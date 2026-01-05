@@ -10,6 +10,17 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const (
+	// DefaultBatchSize is the default maximum blocks per API request.
+	DefaultBatchSize = 100
+
+	// MaxBatchSize is the maximum allowed batch size (Notion API limit).
+	MaxBatchSize = 100
+
+	// DefaultRequestsPerSecond is the default API rate limit.
+	DefaultRequestsPerSecond = 3.0
+)
+
 // Config represents the complete configuration for obsidian-notion.
 type Config struct {
 	// Vault is the path to the Obsidian vault directory.
@@ -109,6 +120,13 @@ func DefaultConfig() *Config {
 				"warning": "⚠️",
 				"tip":     "💡",
 				"info":    "ℹ️",
+				"danger":  "🔴",
+				"example": "📝",
+				"quote":   "💬",
+				"success": "✅",
+				"failure": "❌",
+				"bug":     "🐛",
+				"question": "❓",
 			},
 		},
 		Sync: SyncConfig{
@@ -119,8 +137,8 @@ func DefaultConfig() *Config {
 			},
 		},
 		RateLimit: RateLimitConfig{
-			RequestsPerSecond: 3,
-			BatchSize:         100,
+			RequestsPerSecond: DefaultRequestsPerSecond,
+			BatchSize:         DefaultBatchSize,
 		},
 	}
 }
@@ -222,6 +240,70 @@ func (c *Config) Validate() error {
 
 	if c.Notion.DefaultDatabase == "" && c.Notion.DefaultPage == "" && len(c.Mappings) == 0 {
 		return fmt.Errorf("at least one of notion.default_database, notion.default_page, or mappings is required")
+	}
+
+	// Validate conflict strategy if set.
+	if c.Sync.ConflictStrategy != "" {
+		validStrategies := map[string]bool{
+			"local": true, "remote": true, "manual": true, "newer": true,
+		}
+		if !validStrategies[c.Sync.ConflictStrategy] {
+			return fmt.Errorf("invalid conflict_strategy: %s (must be local, remote, manual, or newer)", c.Sync.ConflictStrategy)
+		}
+	}
+
+	// Validate transform settings if set.
+	if c.Transform.Dataview != "" {
+		validDataview := map[string]bool{"snapshot": true, "placeholder": true}
+		if !validDataview[c.Transform.Dataview] {
+			return fmt.Errorf("invalid dataview transform: %s (must be snapshot or placeholder)", c.Transform.Dataview)
+		}
+	}
+
+	if c.Transform.UnresolvedLinks != "" {
+		validUnresolved := map[string]bool{"placeholder": true, "text": true, "skip": true}
+		if !validUnresolved[c.Transform.UnresolvedLinks] {
+			return fmt.Errorf("invalid unresolved_links transform: %s (must be placeholder, text, or skip)", c.Transform.UnresolvedLinks)
+		}
+	}
+
+	// Validate rate limit settings.
+	if c.RateLimit.RequestsPerSecond < 0 {
+		return fmt.Errorf("rate_limit.requests_per_second must be non-negative")
+	}
+	if c.RateLimit.BatchSize < 1 {
+		c.RateLimit.BatchSize = DefaultBatchSize
+	}
+	if c.RateLimit.BatchSize > MaxBatchSize {
+		return fmt.Errorf("rate_limit.batch_size must not exceed %d", MaxBatchSize)
+	}
+
+	// Validate property mappings in folder mappings.
+	for i, mapping := range c.Mappings {
+		if mapping.Path == "" {
+			return fmt.Errorf("mappings[%d].path is required", i)
+		}
+		if mapping.Database == "" {
+			return fmt.Errorf("mappings[%d].database is required", i)
+		}
+		for j, prop := range mapping.Properties {
+			if prop.Obsidian == "" {
+				return fmt.Errorf("mappings[%d].properties[%d].obsidian is required", i, j)
+			}
+			if prop.Notion == "" {
+				return fmt.Errorf("mappings[%d].properties[%d].notion is required", i, j)
+			}
+			if prop.Type != "" {
+				validTypes := map[string]bool{
+					"title": true, "rich_text": true, "number": true, "select": true,
+					"multi_select": true, "date": true, "checkbox": true, "url": true,
+					"email": true, "phone_number": true, "relation": true, "files": true,
+				}
+				if !validTypes[prop.Type] {
+					return fmt.Errorf("mappings[%d].properties[%d].type is invalid: %s", i, j, prop.Type)
+				}
+			}
+		}
 	}
 
 	return nil
