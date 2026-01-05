@@ -1,6 +1,9 @@
 package transformer
 
 import (
+	"regexp"
+	"strings"
+
 	"github.com/jomei/notionapi"
 	"github.com/yuin/goldmark/ast"
 	extast "github.com/yuin/goldmark/extension/ast"
@@ -149,7 +152,9 @@ func (t *Transformer) transformInline(n ast.Node, source []byte, inherited *noti
 
 	default:
 		// For unknown inline types, try to process children.
-		return t.transformInlineChildren(n, source, inherited)
+		// Also handle highlight pattern (==text==) in text since goldmark-obsidian
+		// doesn't parse highlights as separate nodes.
+		return t.transformInlineChildrenWithHighlight(n, source, inherited)
 	}
 }
 
@@ -182,6 +187,152 @@ func (t *Transformer) transformInlineChildren(n ast.Node, source []byte, annotat
 
 	for child := n.FirstChild(); child != nil; child = child.NextSibling() {
 		result = append(result, t.transformInline(child, source, annotations)...)
+	}
+
+	return result
+}
+
+// highlightRegex matches Obsidian highlight syntax: ==text==
+var highlightRegex = regexp.MustCompile(`==([^=]+)==`)
+
+// transformInlineChildrenWithHighlight processes children, also handling raw highlight patterns.
+// This is a fallback for when goldmark-obsidian doesn't parse highlights as nodes.
+func (t *Transformer) transformInlineChildrenWithHighlight(n ast.Node, source []byte, annotations *notionapi.Annotations) []notionapi.RichText {
+	var result []notionapi.RichText
+
+	for child := n.FirstChild(); child != nil; child = child.NextSibling() {
+		// For text nodes, check for highlight patterns.
+		if txt, ok := child.(*ast.Text); ok {
+			content := string(txt.Segment.Value(source))
+			result = append(result, t.parseTextWithHighlights(content, annotations)...)
+
+			// Handle line breaks.
+			if txt.SoftLineBreak() {
+				result = append(result, notionapi.RichText{
+					Type:        notionapi.ObjectTypeText,
+					Text:        &notionapi.Text{Content: " "},
+					Annotations: copyAnnotations(annotations),
+				})
+			}
+			if txt.HardLineBreak() {
+				result = append(result, notionapi.RichText{
+					Type:        notionapi.ObjectTypeText,
+					Text:        &notionapi.Text{Content: "\n"},
+					Annotations: copyAnnotations(annotations),
+				})
+			}
+		} else {
+			result = append(result, t.transformInline(child, source, annotations)...)
+		}
+	}
+
+	return result
+}
+
+// parseTextWithHighlights parses text content for ==highlight== patterns.
+func (t *Transformer) parseTextWithHighlights(content string, annotations *notionapi.Annotations) []notionapi.RichText {
+	var result []notionapi.RichText
+
+	matches := highlightRegex.FindAllStringSubmatchIndex(content, -1)
+	if len(matches) == 0 {
+		// No highlights, return plain text.
+		if content != "" {
+			result = append(result, notionapi.RichText{
+				Type:        notionapi.ObjectTypeText,
+				Text:        &notionapi.Text{Content: content},
+				Annotations: copyAnnotations(annotations),
+			})
+		}
+		return result
+	}
+
+	lastEnd := 0
+	for _, match := range matches {
+		// match[0] and match[1] are the full match (==text==)
+		// match[2] and match[3] are the capture group (text)
+		fullStart, fullEnd := match[0], match[1]
+		captureStart, captureEnd := match[2], match[3]
+
+		// Add text before the highlight.
+		if fullStart > lastEnd {
+			before := content[lastEnd:fullStart]
+			result = append(result, notionapi.RichText{
+				Type:        notionapi.ObjectTypeText,
+				Text:        &notionapi.Text{Content: before},
+				Annotations: copyAnnotations(annotations),
+			})
+		}
+
+		// Add highlighted text.
+		highlighted := content[captureStart:captureEnd]
+		highlightAnnotations := copyAnnotations(annotations)
+		highlightAnnotations.Color = notionapi.ColorYellowBackground
+		result = append(result, notionapi.RichText{
+			Type:        notionapi.ObjectTypeText,
+			Text:        &notionapi.Text{Content: highlighted},
+			Annotations: highlightAnnotations,
+		})
+
+		lastEnd = fullEnd
+	}
+
+	// Add text after the last highlight.
+	if lastEnd < len(content) {
+		after := content[lastEnd:]
+		result = append(result, notionapi.RichText{
+			Type:        notionapi.ObjectTypeText,
+			Text:        &notionapi.Text{Content: after},
+			Annotations: copyAnnotations(annotations),
+		})
+	}
+
+	return result
+}
+
+// transformTextWithInlineMath parses text for inline math ($...$) patterns.
+func (t *Transformer) transformTextWithInlineMath(content string, annotations *notionapi.Annotations) []notionapi.RichText {
+	var result []notionapi.RichText
+
+	// Inline math pattern: $...$ (but not $$)
+	mathRegex := regexp.MustCompile(`(?:^|[^$])\$([^$\n]+)\$(?:[^$]|$)`)
+
+	matches := mathRegex.FindAllStringSubmatchIndex(content, -1)
+	if len(matches) == 0 {
+		// No inline math, check for highlights.
+		return t.parseTextWithHighlights(content, annotations)
+	}
+
+	lastEnd := 0
+	for _, match := range matches {
+		// Get the capture group for the math content.
+		captureStart, captureEnd := match[2], match[3]
+		// Adjust for the $ delimiters.
+		fullStart := captureStart - 1
+		fullEnd := captureEnd + 1
+
+		// Add text before the math.
+		if fullStart > lastEnd {
+			before := content[lastEnd:fullStart]
+			result = append(result, t.parseTextWithHighlights(before, annotations)...)
+		}
+
+		// Add math expression as equation.
+		mathExpr := content[captureStart:captureEnd]
+		result = append(result, notionapi.RichText{
+			Type: "equation",
+			Equation: &notionapi.Equation{
+				Expression: strings.TrimSpace(mathExpr),
+			},
+			Annotations: copyAnnotations(annotations),
+		})
+
+		lastEnd = fullEnd
+	}
+
+	// Add text after the last math expression.
+	if lastEnd < len(content) {
+		after := content[lastEnd:]
+		result = append(result, t.parseTextWithHighlights(after, annotations)...)
 	}
 
 	return result

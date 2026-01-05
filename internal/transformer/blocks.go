@@ -262,6 +262,118 @@ func (t *Transformer) transformDivider() notionapi.Block {
 	}
 }
 
+// transformTable converts a goldmark table to a Notion table block.
+func (t *Transformer) transformTable(table *extast.Table, source []byte) notionapi.Block {
+	// Count columns by looking at the header row.
+	columnCount := 0
+	hasHeader := false
+
+	// First pass: count columns from header.
+	for row := table.FirstChild(); row != nil; row = row.NextSibling() {
+		if header, ok := row.(*extast.TableHeader); ok {
+			hasHeader = true
+			for cell := header.FirstChild(); cell != nil; cell = cell.NextSibling() {
+				columnCount++
+			}
+			break
+		}
+	}
+
+	// If no header, count from first row.
+	if columnCount == 0 {
+		for row := table.FirstChild(); row != nil; row = row.NextSibling() {
+			if tableRow, ok := row.(*extast.TableRow); ok {
+				for cell := tableRow.FirstChild(); cell != nil; cell = cell.NextSibling() {
+					columnCount++
+				}
+				break
+			}
+		}
+	}
+
+	// Ensure at least 1 column.
+	if columnCount == 0 {
+		columnCount = 1
+	}
+
+	// Build table rows.
+	var rows []notionapi.TableRow
+
+	for row := table.FirstChild(); row != nil; row = row.NextSibling() {
+		switch r := row.(type) {
+		case *extast.TableHeader:
+			tableRow := t.transformTableRow(r, source, columnCount)
+			rows = append(rows, tableRow)
+
+		case *extast.TableRow:
+			tableRow := t.transformTableRow(r, source, columnCount)
+			rows = append(rows, tableRow)
+		}
+	}
+
+	return &notionapi.TableBlock{
+		BasicBlock: notionapi.BasicBlock{
+			Object: notionapi.ObjectTypeBlock,
+			Type:   notionapi.BlockTypeTableBlock,
+		},
+		Table: notionapi.Table{
+			TableWidth:      columnCount,
+			HasColumnHeader: hasHeader,
+			HasRowHeader:    false,
+			Children:        buildTableRowBlocks(rows),
+		},
+	}
+}
+
+// transformTableRow converts a table row (header or body) to Notion table row data.
+func (t *Transformer) transformTableRow(row ast.Node, source []byte, expectedColumns int) notionapi.TableRow {
+	var cells [][]notionapi.RichText
+
+	for cell := row.FirstChild(); cell != nil; cell = cell.NextSibling() {
+		if tableCell, ok := cell.(*extast.TableCell); ok {
+			cellContent := t.transformInlineContent(tableCell, source)
+			cells = append(cells, cellContent)
+		}
+	}
+
+	// Pad with empty cells if needed.
+	for len(cells) < expectedColumns {
+		cells = append(cells, []notionapi.RichText{})
+	}
+
+	return notionapi.TableRow{
+		Cells: cells,
+	}
+}
+
+// buildTableRowBlocks converts TableRow data to TableRowBlock slices.
+func buildTableRowBlocks(rows []notionapi.TableRow) []notionapi.Block {
+	blocks := make([]notionapi.Block, len(rows))
+	for i, row := range rows {
+		blocks[i] = &notionapi.TableRowBlock{
+			BasicBlock: notionapi.BasicBlock{
+				Object: notionapi.ObjectTypeBlock,
+				Type:   notionapi.BlockTypeTableRowBlock,
+			},
+			TableRow: row,
+		}
+	}
+	return blocks
+}
+
+// transformEquation converts a math block to a Notion equation block.
+func (t *Transformer) transformEquation(expression string) notionapi.Block {
+	return &notionapi.EquationBlock{
+		BasicBlock: notionapi.BasicBlock{
+			Object: notionapi.ObjectTypeBlock,
+			Type:   notionapi.BlockTypeEquation,
+		},
+		Equation: notionapi.Equation{
+			Expression: expression,
+		},
+	}
+}
+
 // Helper functions
 
 // isTaskItem checks if a list item is a task (checkbox) item.
@@ -367,15 +479,25 @@ func (t *Transformer) transformCalloutParagraph(p *ast.Paragraph, source []byte)
 }
 
 // getBlockquoteFirstLine extracts the first line of text from a blockquote.
+// It concatenates all text segments until a line break is encountered.
 func getBlockquoteFirstLine(bq *ast.Blockquote, source []byte) string {
+	var result strings.Builder
 	for child := bq.FirstChild(); child != nil; child = child.NextSibling() {
 		if p, ok := child.(*ast.Paragraph); ok {
 			for inline := p.FirstChild(); inline != nil; inline = inline.NextSibling() {
 				if t, ok := inline.(*ast.Text); ok {
-					return string(t.Segment.Value(source))
+					result.Write(t.Segment.Value(source))
+					// Stop at line break - we only want the first line.
+					if t.SoftLineBreak() || t.HardLineBreak() {
+						return result.String()
+					}
 				}
+			}
+			// If no line break found, return what we have (single line blockquote).
+			if result.Len() > 0 {
+				return result.String()
 			}
 		}
 	}
-	return ""
+	return result.String()
 }

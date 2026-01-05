@@ -6,8 +6,12 @@
 package transformer
 
 import (
+	"regexp"
+	"strings"
+
 	"github.com/jomei/notionapi"
 	"github.com/yuin/goldmark/ast"
+	extast "github.com/yuin/goldmark/extension/ast"
 
 	"github.com/adamancini/obsidian-notion-sync/internal/parser"
 )
@@ -144,6 +148,10 @@ func (t *Transformer) transformNode(n ast.Node, source []byte) (notionapi.Block,
 		return t.transformHeading(node, source), true
 
 	case *ast.Paragraph:
+		// Check for math block ($$...$$ on its own line).
+		if mathExpr := t.tryMathBlock(node, source); mathExpr != "" {
+			return t.transformEquation(mathExpr), true
+		}
 		return t.transformParagraph(node, source), true
 
 	case *ast.List:
@@ -155,6 +163,11 @@ func (t *Transformer) transformNode(n ast.Node, source []byte) (notionapi.Block,
 		return t.transformListItem(node, source), true
 
 	case *ast.FencedCodeBlock:
+		// Check for math code block.
+		lang := string(node.Language(source))
+		if lang == "math" || lang == "latex" {
+			return t.transformMathCodeBlock(node, source), true
+		}
 		return t.transformCodeBlock(node, source), true
 
 	case *ast.Blockquote:
@@ -172,8 +185,8 @@ func (t *Transformer) transformNode(n ast.Node, source []byte) (notionapi.Block,
 		return nil, false
 
 	default:
-		// Unknown node type, skip.
-		return nil, false
+		// Check for extension types.
+		return t.transformExtensionNode(n, source)
 	}
 }
 
@@ -209,4 +222,59 @@ func (t *Transformer) transformProperties(frontmatter map[string]any, tags []str
 	}
 
 	return props
+}
+
+// transformExtensionNode handles goldmark extension node types.
+func (t *Transformer) transformExtensionNode(n ast.Node, source []byte) (notionapi.Block, bool) {
+	switch node := n.(type) {
+	case *extast.Table:
+		return t.transformTable(node, source), true
+
+	case *extast.TableHeader, *extast.TableRow, *extast.TableCell:
+		// Table internals are handled by transformTable.
+		return nil, false
+
+	default:
+		// Unknown extension type, skip.
+		return nil, false
+	}
+}
+
+// mathBlockRegex matches display math: $$ ... $$ (potentially multiline).
+var mathBlockRegex = regexp.MustCompile(`^\s*\$\$\s*([\s\S]*?)\s*\$\$\s*$`)
+
+// tryMathBlock checks if a paragraph is a display math block ($$...$$).
+// Returns the expression if it is, empty string otherwise.
+func (t *Transformer) tryMathBlock(p *ast.Paragraph, source []byte) string {
+	// Get the raw text content of the paragraph.
+	var content strings.Builder
+	for child := p.FirstChild(); child != nil; child = child.NextSibling() {
+		if txt, ok := child.(*ast.Text); ok {
+			content.Write(txt.Segment.Value(source))
+		}
+	}
+
+	text := content.String()
+	matches := mathBlockRegex.FindStringSubmatch(text)
+	if matches == nil {
+		return ""
+	}
+
+	return strings.TrimSpace(matches[1])
+}
+
+// transformMathCodeBlock converts a ```math or ```latex code block to an equation.
+func (t *Transformer) transformMathCodeBlock(cb *ast.FencedCodeBlock, source []byte) notionapi.Block {
+	// Get the expression from the code block content.
+	var content strings.Builder
+	lines := cb.Lines()
+	for i := 0; i < lines.Len(); i++ {
+		line := lines.At(i)
+		content.Write(line.Value(source))
+	}
+
+	// Trim whitespace.
+	expression := strings.TrimSpace(content.String())
+
+	return t.transformEquation(expression)
 }
