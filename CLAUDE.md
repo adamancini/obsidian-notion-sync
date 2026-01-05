@@ -6,7 +6,47 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 A Go CLI tool for bidirectional synchronization between Obsidian vaults and Notion databases. Converts Obsidian-specific features (wiki-links, frontmatter, callouts) to Notion's block-based format while preserving semantic meaning.
 
-**Current Status:** Design phase complete, implementation pending. See `docs/plans/2025-01-05-obsidian-notion-sync-design.md` for the full specification.
+**Current Status:** Design phase complete, implementation in progress.
+
+## Linear Project Management (MANDATORY)
+
+**Linear is the source of truth for all design and implementation plans in this project.**
+
+**Project:** [Obsidian-Notion Sync](https://linear.app/annarchy-net/project/obsidian-notion-sync-89440620c47a)
+
+### Requirements
+
+1. **Before starting work:**
+   - Check Linear for existing issues related to the task
+   - Create a new issue if one doesn't exist
+   - Reference issue ID in commits (e.g., `Ref: ANN-5`)
+
+2. **During implementation:**
+   - Update issue status (Backlog → In Progress → Done)
+   - Add implementation notes and decisions to the issue
+   - Link commits and PRs to issues
+
+3. **When making architectural changes:**
+   - Document decisions in the Linear issue
+   - Update related issues if scope changes
+   - Create new issues for discovered work
+
+4. **After completing work:**
+   - Mark issue as Done
+   - Add commit links to the issue description
+   - Update any blocking/related issues
+
+### What Goes in Linear
+
+- All implementation tasks and subtasks
+- Architecture decisions and rationale
+- Bug reports and fixes
+- Feature requests and enhancements
+- Technical debt items
+
+### Reference Documents
+
+- `docs/plans/2025-01-05-obsidian-notion-sync-design.md` - Original design specification (reference only, Linear is authoritative for current plans)
 
 ## Build Commands
 
