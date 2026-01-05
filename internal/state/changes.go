@@ -1,0 +1,272 @@
+package state
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+)
+
+// ChangeType represents the type of change detected.
+type ChangeType string
+
+const (
+	ChangeCreated  ChangeType = "created"
+	ChangeModified ChangeType = "modified"
+	ChangeDeleted  ChangeType = "deleted"
+	ChangeConflict ChangeType = "conflict"
+)
+
+// Direction indicates whether a change should be pushed or pulled.
+type Direction string
+
+const (
+	DirectionPush Direction = "push"
+	DirectionPull Direction = "pull"
+	DirectionBoth Direction = "both" // Conflict
+)
+
+// Change represents a detected change in the sync state.
+type Change struct {
+	Path       string
+	Type       ChangeType
+	Direction  Direction
+	LocalHash  string
+	RemoteHash string
+	LocalMtime time.Time
+	RemoteMtime time.Time
+}
+
+// ChangeDetector detects changes between the local vault and sync state.
+type ChangeDetector struct {
+	db        *DB
+	vaultPath string
+}
+
+// NewChangeDetector creates a new ChangeDetector.
+func NewChangeDetector(db *DB, vaultPath string) *ChangeDetector {
+	return &ChangeDetector{
+		db:        db,
+		vaultPath: vaultPath,
+	}
+}
+
+// DetectChanges scans the vault and compares with stored sync state.
+func (d *ChangeDetector) DetectChanges(ctx context.Context) ([]Change, error) {
+	var changes []Change
+
+	// 1. Scan local vault.
+	localFiles, err := d.scanVault()
+	if err != nil {
+		return nil, fmt.Errorf("scan vault: %w", err)
+	}
+
+	// 2. Get all sync states.
+	states, err := d.db.ListStates("")
+	if err != nil {
+		return nil, fmt.Errorf("list states: %w", err)
+	}
+
+	// Build map for quick lookup.
+	stateMap := make(map[string]*SyncState)
+	for _, state := range states {
+		stateMap[state.ObsidianPath] = state
+	}
+
+	// 3. Check each local file.
+	for path, info := range localFiles {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		state, exists := stateMap[path]
+
+		if !exists {
+			// New local file - needs to be pushed.
+			changes = append(changes, Change{
+				Path:       path,
+				Type:       ChangeCreated,
+				Direction:  DirectionPush,
+				LocalMtime: info.ModTime(),
+			})
+			continue
+		}
+
+		// File exists in state - check for modifications.
+		content, err := os.ReadFile(filepath.Join(d.vaultPath, path))
+		if err != nil {
+			continue // Skip files we can't read.
+		}
+
+		localHash := hashContent(content)
+
+		if localHash != state.ContentHash {
+			// Local modification detected.
+			change := Change{
+				Path:       path,
+				Type:       ChangeModified,
+				Direction:  DirectionPush,
+				LocalHash:  localHash,
+				LocalMtime: info.ModTime(),
+			}
+
+			// Check if remote was also modified (conflict).
+			// TODO: Implement remote change detection via Notion API.
+			// For now, assume no conflicts unless state indicates so.
+			if state.Status == "conflict" {
+				change.Type = ChangeConflict
+				change.Direction = DirectionBoth
+			}
+
+			changes = append(changes, change)
+		}
+
+		// Mark as seen.
+		delete(stateMap, path)
+	}
+
+	// 4. Check for deleted files (in state but not in vault).
+	for path, state := range stateMap {
+		if state.NotionPageID != "" {
+			// File was synced but no longer exists locally.
+			changes = append(changes, Change{
+				Path:       path,
+				Type:       ChangeDeleted,
+				Direction:  DirectionPush, // Delete from Notion too.
+				RemoteHash: state.ContentHash,
+			})
+		}
+	}
+
+	return changes, nil
+}
+
+// DetectRemoteChanges checks Notion for pages modified since last sync.
+// This requires the Notion client and is called separately.
+func (d *ChangeDetector) DetectRemoteChanges(ctx context.Context, getRemoteInfo func(pageID string) (hash string, mtime time.Time, err error)) ([]Change, error) {
+	var changes []Change
+
+	// Get all synced states with Notion page IDs.
+	states, err := d.db.ListStates("synced")
+	if err != nil {
+		return nil, fmt.Errorf("list states: %w", err)
+	}
+
+	for _, state := range states {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		if state.NotionPageID == "" {
+			continue
+		}
+
+		// Check remote state.
+		remoteHash, remoteMtime, err := getRemoteInfo(state.NotionPageID)
+		if err != nil {
+			// Page might be deleted or inaccessible.
+			continue
+		}
+
+		// Check if remote was modified after last sync.
+		if remoteMtime.After(state.LastSync) && remoteHash != state.ContentHash {
+			// Check if local was also modified.
+			localContent, err := os.ReadFile(filepath.Join(d.vaultPath, state.ObsidianPath))
+			if err != nil {
+				// Local file might be deleted.
+				changes = append(changes, Change{
+					Path:        state.ObsidianPath,
+					Type:        ChangeModified,
+					Direction:   DirectionPull,
+					RemoteHash:  remoteHash,
+					RemoteMtime: remoteMtime,
+				})
+				continue
+			}
+
+			localHash := hashContent(localContent)
+
+			if localHash != state.ContentHash {
+				// Both modified - conflict!
+				changes = append(changes, Change{
+					Path:        state.ObsidianPath,
+					Type:        ChangeConflict,
+					Direction:   DirectionBoth,
+					LocalHash:   localHash,
+					RemoteHash:  remoteHash,
+					RemoteMtime: remoteMtime,
+				})
+			} else {
+				// Only remote modified.
+				changes = append(changes, Change{
+					Path:        state.ObsidianPath,
+					Type:        ChangeModified,
+					Direction:   DirectionPull,
+					RemoteHash:  remoteHash,
+					RemoteMtime: remoteMtime,
+				})
+			}
+		}
+	}
+
+	return changes, nil
+}
+
+// scanVault walks the vault directory and returns all markdown files.
+func (d *ChangeDetector) scanVault() (map[string]fs.FileInfo, error) {
+	files := make(map[string]fs.FileInfo)
+
+	err := filepath.WalkDir(d.vaultPath, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip hidden directories (like .obsidian).
+		if entry.IsDir() && strings.HasPrefix(entry.Name(), ".") {
+			return filepath.SkipDir
+		}
+
+		// Only process markdown files.
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".md") {
+			relPath, err := filepath.Rel(d.vaultPath, path)
+			if err != nil {
+				return err
+			}
+
+			info, err := entry.Info()
+			if err != nil {
+				return err
+			}
+
+			files[relPath] = info
+		}
+
+		return nil
+	})
+
+	return files, err
+}
+
+// HashContent computes a SHA-256 hash of content.
+func hashContent(content []byte) string {
+	hash := sha256.Sum256(content)
+	return hex.EncodeToString(hash[:])
+}
+
+// HashFile computes a SHA-256 hash of a file.
+func HashFile(path string) (string, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	return hashContent(content), nil
+}

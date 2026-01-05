@@ -1,0 +1,37 @@
+# Build artifacts
+build/
+dist/
+
+# Binary
+obsidian-notion
+
+# Test artifacts
+coverage.out
+coverage.html
+*.test
+
+# SQLite databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+sync.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with secrets (keep template)
+.obsidian-notion.yaml
+config.yaml
+
+# Debug
+debug/
+*.log
