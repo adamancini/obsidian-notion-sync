@@ -171,9 +171,41 @@ func extractBlockID(block notionapi.Block) string {
 }
 
 // setBlockChildren sets children on a block that supports them.
+// Note: This modifies the block's Children field based on block type.
 func setBlockChildren(block notionapi.Block, children []notionapi.Block) notionapi.Block {
-	// TODO: Set children on the appropriate field based on block type.
-	// This is complex because each block type has a different structure.
-	// For now, return the original block.
-	return block
+	switch b := block.(type) {
+	case *notionapi.ParagraphBlock:
+		b.Paragraph.Children = children
+		return b
+	case *notionapi.BulletedListItemBlock:
+		b.BulletedListItem.Children = children
+		return b
+	case *notionapi.NumberedListItemBlock:
+		b.NumberedListItem.Children = children
+		return b
+	case *notionapi.ToDoBlock:
+		b.ToDo.Children = children
+		return b
+	case *notionapi.ToggleBlock:
+		b.Toggle.Children = children
+		return b
+	case *notionapi.QuoteBlock:
+		b.Quote.Children = children
+		return b
+	case *notionapi.CalloutBlock:
+		b.Callout.Children = children
+		return b
+	case *notionapi.ColumnListBlock:
+		b.ColumnList.Children = children
+		return b
+	case *notionapi.ColumnBlock:
+		b.Column.Children = children
+		return b
+	case *notionapi.SyncedBlock:
+		b.SyncedBlock.Children = children
+		return b
+	default:
+		// Block type doesn't support children, return unchanged.
+		return block
+	}
 }

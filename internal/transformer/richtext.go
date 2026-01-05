@@ -3,6 +3,8 @@ package transformer
 import (
 	"github.com/jomei/notionapi"
 	"github.com/yuin/goldmark/ast"
+	extast "github.com/yuin/goldmark/extension/ast"
+	"go.abhg.dev/goldmark/wikilink"
 )
 
 // transformInlineContent converts all inline children of a node to rich text.
@@ -129,6 +131,22 @@ func (t *Transformer) transformInline(n ast.Node, source []byte, inherited *noti
 			},
 		}
 
+	case *wikilink.Node:
+		// Wiki-link: [[target]] or [[target|alias]]
+		target := string(node.Target)
+		alias := extractWikilinkAliasFromNode(node, source)
+		return t.transformWikiLink(target, alias, inherited)
+
+	case *extast.Strikethrough:
+		// Strikethrough: ~~text~~
+		newAnnotations := copyAnnotations(inherited)
+		newAnnotations.Strikethrough = true
+		return t.transformInlineChildren(node, source, newAnnotations)
+
+	case *extast.TaskCheckBox:
+		// Task checkbox: skip, it's handled at the list item level.
+		return nil
+
 	default:
 		// For unknown inline types, try to process children.
 		return t.transformInlineChildren(n, source, inherited)
@@ -248,6 +266,18 @@ func copyAnnotations(a *notionapi.Annotations) *notionapi.Annotations {
 		Code:          a.Code,
 		Color:         a.Color,
 	}
+}
+
+// extractWikilinkAliasFromNode extracts the alias text from a wiki-link node.
+// For [[target|alias]], the alias is stored as child text nodes.
+func extractWikilinkAliasFromNode(node *wikilink.Node, source []byte) string {
+	var alias string
+	for child := node.FirstChild(); child != nil; child = child.NextSibling() {
+		if text, ok := child.(*ast.Text); ok {
+			alias += string(text.Segment.Value(source))
+		}
+	}
+	return alias
 }
 
 // displayText returns the display text for a wiki-link.

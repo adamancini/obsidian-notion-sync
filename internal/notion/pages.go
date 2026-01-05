@@ -214,13 +214,7 @@ func (c *Client) deleteAllBlocks(ctx context.Context, pageID string) error {
 }
 
 // getBlockID extracts the block ID from a notionapi.Block interface.
+// Uses the extractBlockID function from blocks.go.
 func getBlockID(block notionapi.Block) string {
-	// All block types embed BasicBlock which has the ID.
-	// We need to use type assertion to access it.
-	// This is a simplified implementation - full implementation would
-	// check each block type.
-
-	// TODO: Implement proper block ID extraction
-	// For now, return empty string
-	return ""
+	return extractBlockID(block)
 }

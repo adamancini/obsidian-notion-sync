@@ -1,10 +1,12 @@
 package transformer
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/jomei/notionapi"
 	"github.com/yuin/goldmark/ast"
+	extast "github.com/yuin/goldmark/extension/ast"
 )
 
 // transformHeading converts a goldmark heading to a Notion heading block.
@@ -183,6 +185,9 @@ func (t *Transformer) transformQuote(bq *ast.Blockquote, source []byte) notionap
 	}
 }
 
+// calloutRegex matches Obsidian callout syntax: [!type] or [!type]+ or [!type]- with optional title.
+var calloutRegex = regexp.MustCompile(`^\[!(\w+)\]([+-])?(.*)$`)
+
 // tryCallout attempts to parse a blockquote as an Obsidian callout.
 // Returns nil if it's not a callout.
 func (t *Transformer) tryCallout(bq *ast.Blockquote, source []byte) notionapi.Block {
@@ -190,18 +195,14 @@ func (t *Transformer) tryCallout(bq *ast.Blockquote, source []byte) notionapi.Bl
 	firstLine := getBlockquoteFirstLine(bq, source)
 
 	// Check for callout syntax: > [!type] or > [!type] title
-	if !strings.HasPrefix(firstLine, "[!") {
+	matches := calloutRegex.FindStringSubmatch(firstLine)
+	if matches == nil {
 		return nil
 	}
 
-	// Extract callout type.
-	endBracket := strings.Index(firstLine, "]")
-	if endBracket == -1 {
-		return nil
-	}
-
-	calloutType := strings.ToLower(firstLine[2:endBracket])
-	title := strings.TrimSpace(firstLine[endBracket+1:])
+	calloutType := strings.ToLower(matches[1])
+	// matches[2] is the fold indicator (+ or -), we ignore it for Notion
+	title := strings.TrimSpace(matches[3])
 
 	// Get icon for this callout type.
 	icon := t.config.CalloutIcons[calloutType]
@@ -209,23 +210,31 @@ func (t *Transformer) tryCallout(bq *ast.Blockquote, source []byte) notionapi.Bl
 		icon = "💡" // Default icon
 	}
 
-	// Get remaining content.
-	content := t.transformBlockquoteContent(bq, source)
-	// TODO: Strip the first line (callout marker) from content
+	// Get remaining content, skipping the first line (callout marker).
+	content := t.transformCalloutContent(bq, source)
 
 	// Build callout block.
-	var titleText []notionapi.RichText
+	var richText []notionapi.RichText
+
+	// Add title with bold formatting if present.
 	if title != "" {
-		titleText = []notionapi.RichText{
-			{
-				Type: notionapi.ObjectTypeText,
-				Text: &notionapi.Text{Content: title},
-				Annotations: &notionapi.Annotations{
-					Bold: true,
-				},
+		richText = append(richText, notionapi.RichText{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: title},
+			Annotations: &notionapi.Annotations{
+				Bold: true,
 			},
+		})
+		// Add newline separator if there's content after the title.
+		if len(content) > 0 {
+			richText = append(richText, notionapi.RichText{
+				Type: notionapi.ObjectTypeText,
+				Text: &notionapi.Text{Content: "\n"},
+			})
 		}
 	}
+
+	richText = append(richText, content...)
 
 	emoji := notionapi.Emoji(icon)
 	return &notionapi.CalloutBlock{
@@ -234,7 +243,7 @@ func (t *Transformer) tryCallout(bq *ast.Blockquote, source []byte) notionapi.Bl
 			Type:   "callout",
 		},
 		Callout: notionapi.Callout{
-			RichText: append(titleText, content...),
+			RichText: richText,
 			Icon: &notionapi.Icon{
 				Type:  "emoji",
 				Emoji: &emoji,
@@ -256,11 +265,15 @@ func (t *Transformer) transformDivider() notionapi.Block {
 // Helper functions
 
 // isTaskItem checks if a list item is a task (checkbox) item.
+// Task items have a TaskCheckBox node as the first child of their content.
 func isTaskItem(li *ast.ListItem) bool {
-	// Check for task list item marker.
-	if tc := li.FirstChild(); tc != nil {
-		if tb, ok := tc.(*ast.TextBlock); ok {
-			_ = tb // TODO: Check for [ ] or [x] prefix
+	// Walk through children to find TaskCheckBox.
+	for child := li.FirstChild(); child != nil; child = child.NextSibling() {
+		// Check the first inline-level child of block-level content.
+		for inner := child.FirstChild(); inner != nil; inner = inner.NextSibling() {
+			if _, ok := inner.(*extast.TaskCheckBox); ok {
+				return true
+			}
 		}
 	}
 	return false
@@ -268,7 +281,14 @@ func isTaskItem(li *ast.ListItem) bool {
 
 // isTaskChecked checks if a task item is checked.
 func isTaskChecked(li *ast.ListItem, source []byte) bool {
-	// TODO: Implement checkbox state detection
+	// Walk through children to find TaskCheckBox.
+	for child := li.FirstChild(); child != nil; child = child.NextSibling() {
+		for inner := child.FirstChild(); inner != nil; inner = inner.NextSibling() {
+			if cb, ok := inner.(*extast.TaskCheckBox); ok {
+				return cb.IsChecked
+			}
+		}
+	}
 	return false
 }
 
@@ -294,6 +314,53 @@ func (t *Transformer) transformBlockquoteContent(bq *ast.Blockquote, source []by
 		if p, ok := child.(*ast.Paragraph); ok {
 			result = append(result, t.transformInlineContent(p, source)...)
 		}
+	}
+
+	return result
+}
+
+// transformCalloutContent extracts content from a callout blockquote,
+// skipping the first line which contains the callout marker.
+func (t *Transformer) transformCalloutContent(bq *ast.Blockquote, source []byte) []notionapi.RichText {
+	var result []notionapi.RichText
+	isFirst := true
+
+	for child := bq.FirstChild(); child != nil; child = child.NextSibling() {
+		if p, ok := child.(*ast.Paragraph); ok {
+			if isFirst {
+				// Skip content before the first newline in the first paragraph.
+				// The callout marker is on the first line.
+				isFirst = false
+				result = append(result, t.transformCalloutParagraph(p, source)...)
+			} else {
+				result = append(result, t.transformInlineContent(p, source)...)
+			}
+		}
+	}
+
+	return result
+}
+
+// transformCalloutParagraph transforms a paragraph, skipping the first line.
+func (t *Transformer) transformCalloutParagraph(p *ast.Paragraph, source []byte) []notionapi.RichText {
+	var result []notionapi.RichText
+	skippedFirstLine := false
+
+	for child := p.FirstChild(); child != nil; child = child.NextSibling() {
+		if !skippedFirstLine {
+			// Skip until we hit a soft/hard line break or run out of text nodes.
+			if txt, ok := child.(*ast.Text); ok {
+				if txt.SoftLineBreak() || txt.HardLineBreak() {
+					skippedFirstLine = true
+					continue
+				}
+				// Skip this text node as it's part of the first line.
+				continue
+			}
+		}
+
+		// Process remaining content.
+		result = append(result, t.transformInline(child, source, nil)...)
 	}
 
 	return result

@@ -6,11 +6,17 @@
 package parser
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/text"
 
 	obsidian "github.com/powerman/goldmark-obsidian"
+	"go.abhg.dev/goldmark/hashtag"
 	"go.abhg.dev/goldmark/wikilink"
 )
 
@@ -118,15 +124,57 @@ func (p *Parser) Parse(path string, content []byte) (*ParsedNote, error) {
 			return ast.WalkContinue, nil
 		}
 
-		// TODO: Implement AST node collection
-		// switch node := n.(type) {
-		// case *wikilink.Node:
-		//     // Collect wiki-link
-		// case *obsidian.Tag:
-		//     // Collect tag
-		// case *obsidian.Embed:
-		//     // Collect embed
-		// }
+		switch node := n.(type) {
+		case *wikilink.Node:
+			// Wiki-link node: [[target]] or [[target|alias]] or ![[embed]]
+			target := string(node.Target)
+			fragment := string(node.Fragment)
+
+			// Parse heading and block references from fragment.
+			var heading, block string
+			if fragment != "" {
+				if strings.HasPrefix(fragment, "^") {
+					block = fragment[1:]
+				} else {
+					heading = fragment
+				}
+			}
+
+			// Get alias from children if present.
+			alias := extractWikilinkAlias(node, body)
+
+			// Determine line number.
+			line := 0
+			if node.Parent() != nil {
+				// Walk up to find a block-level parent with line info.
+				line = findNodeLine(node, body)
+			}
+
+			if node.Embed {
+				// This is an embed: ![[target]]
+				embeds = append(embeds, Embed{
+					Target:  target,
+					IsImage: isImageEmbed(target),
+					Line:    line,
+				})
+			} else {
+				// Regular wiki-link.
+				links = append(links, WikiLink{
+					Target:  target,
+					Alias:   alias,
+					Heading: heading,
+					Block:   block,
+					Line:    line,
+				})
+			}
+
+		case *hashtag.Node:
+			// Hashtag node: #tag
+			tag := string(node.Tag)
+			if tag != "" {
+				tags = append(tags, tag)
+			}
+		}
 
 		return ast.WalkContinue, nil
 	})
@@ -165,13 +213,59 @@ func (p *Parser) Parse(path string, content []byte) (*ParsedNote, error) {
 
 // ParseFile reads and parses a file from the filesystem.
 func (p *Parser) ParseFile(vaultRoot, relativePath string) (*ParsedNote, error) {
-	// TODO: Implement file reading
-	// fullPath := filepath.Join(vaultRoot, relativePath)
-	// content, err := os.ReadFile(fullPath)
-	// if err != nil {
-	//     return nil, fmt.Errorf("read file: %w", err)
-	// }
-	// return p.Parse(relativePath, content)
+	fullPath := filepath.Join(vaultRoot, relativePath)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return nil, fmt.Errorf("read file %s: %w", relativePath, err)
+	}
+	return p.Parse(relativePath, content)
+}
 
-	return nil, nil
+// extractWikilinkAlias extracts the alias text from a wiki-link node.
+// For [[target|alias]], the alias is stored as child text nodes.
+func extractWikilinkAlias(node *wikilink.Node, source []byte) string {
+	var alias strings.Builder
+	for child := node.FirstChild(); child != nil; child = child.NextSibling() {
+		if text, ok := child.(*ast.Text); ok {
+			alias.Write(text.Segment.Value(source))
+		}
+	}
+	return alias.String()
+}
+
+// findNodeLine attempts to find the line number for a node.
+// Returns 1-indexed line number, or 0 if unknown.
+func findNodeLine(n ast.Node, source []byte) int {
+	// Walk up to find a node with line info.
+	for node := n; node != nil; node = node.Parent() {
+		if node.Lines().Len() > 0 {
+			line := node.Lines().At(0)
+			// Count newlines to determine line number.
+			return countNewlines(source[:line.Start]) + 1
+		}
+	}
+	return 0
+}
+
+// countNewlines counts the number of newline characters in a byte slice.
+func countNewlines(b []byte) int {
+	count := 0
+	for _, c := range b {
+		if c == '\n' {
+			count++
+		}
+	}
+	return count
+}
+
+// isImageEmbed checks if an embed target is an image.
+func isImageEmbed(target string) bool {
+	lower := strings.ToLower(target)
+	imageExts := []string{".png", ".jpg", ".jpeg", ".gif", ".bmp", ".svg", ".webp"}
+	for _, ext := range imageExts {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
 }
