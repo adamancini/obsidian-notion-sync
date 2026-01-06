@@ -90,13 +90,16 @@ func init() {
 	rootCmd.AddCommand(syncCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(conflictsCmd)
+	rootCmd.AddCommand(linksCmd)
 }
 
-// getConfig returns the loaded configuration or exits if not available.
-func getConfig() *config.Config {
+// ErrNoConfig is returned when no configuration is available.
+var ErrNoConfig = fmt.Errorf("no configuration found - run 'obsidian-notion init' first")
+
+// getConfig returns the loaded configuration or an error if not available.
+func getConfig() (*config.Config, error) {
 	if cfg == nil {
-		fmt.Fprintln(os.Stderr, "Error: No configuration found. Run 'obsidian-notion init' first.")
-		os.Exit(1)
+		return nil, ErrNoConfig
 	}
-	return cfg
+	return cfg, nil
 }

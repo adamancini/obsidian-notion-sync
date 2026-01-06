@@ -52,7 +52,10 @@ func init() {
 }
 
 func runPush(cmd *cobra.Command, args []string) error {
-	cfg := getConfig()
+	cfg, err := getConfig()
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
@@ -557,22 +560,25 @@ func (pc *pushContext) processFile(ctx context.Context, f pushFile) (pushResult,
 		}
 	}
 
-	// Compute content hash.
-	hash, err := state.HashFile(fullPath)
+	// Compute content hashes (normalized, with separate frontmatter hash).
+	hashes, err := state.HashFileDetailed(fullPath)
 	if err != nil {
-		hash = "" // Non-fatal, continue without hash
+		hashes = state.ContentHashes{} // Non-fatal, continue without hashes
 	}
 
-	// Update sync state.
+	// Update sync state with both content and frontmatter hashes.
+	// ContentHash stores the body hash (for detecting content-only changes).
+	// FrontmatterHash stores the metadata hash (for property-only updates).
 	syncState := &state.SyncState{
-		ObsidianPath:  f.path,
-		NotionPageID:  pageID,
-		ObsidianMtime: f.mtime,
-		NotionMtime:   time.Now(),
-		ContentHash:   hash,
-		LastSync:      time.Now(),
-		SyncDirection: "push",
-		Status:        "synced",
+		ObsidianPath:    f.path,
+		NotionPageID:    pageID,
+		ObsidianMtime:   f.mtime,
+		NotionMtime:     time.Now(),
+		ContentHash:     hashes.ContentHash,
+		FrontmatterHash: hashes.FrontmatterHash,
+		LastSync:        time.Now(),
+		SyncDirection:   "push",
+		Status:          "synced",
 	}
 	if err := pc.db.SetState(syncState); err != nil {
 		return pushResult{}, fmt.Errorf("update state: %w", err)

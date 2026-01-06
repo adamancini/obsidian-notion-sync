@@ -51,7 +51,10 @@ func init() {
 }
 
 func runPull(cmd *cobra.Command, args []string) error {
-	cfg := getConfig()
+	cfg, err := getConfig()
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()

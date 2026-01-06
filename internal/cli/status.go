@@ -42,7 +42,10 @@ func init() {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	cfg := getConfig()
+	cfg, err := getConfig()
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
