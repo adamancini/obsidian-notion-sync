@@ -12,16 +12,14 @@ linters:
   default: standard
   enable:
     # Code quality
-    - misspell      # Finds commonly misspelled words
-    - unconvert     # Removes unnecessary type conversions
-    - goconst       # Finds repeated strings that could be constants
-    - dupl          # Detects code clones
-
+    - misspell
+    - unconvert
+    - goconst
+    - dupl
     # Security
-    - gosec         # Security checks
-
+    - gosec
     # Performance
-    - prealloc      # Finds slice declarations that could be pre-allocated
+    - prealloc
 
 linters-settings:
   errcheck:
@@ -42,12 +40,12 @@ linters-settings:
   staticcheck:
     checks:
       - all
-      - -SA1019  # Allow deprecated API usage
+      - -SA1019
 
   gosec:
     excludes:
-      - G104  # Covered by errcheck
-      - G304  # File path taint expected for CLI
+      - G104
+      - G304
 
   misspell:
     locale: US
