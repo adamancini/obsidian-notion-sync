@@ -141,8 +141,9 @@ func (d *ChangeDetector) DetectChanges(ctx context.Context) ([]Change, error) {
 			}
 
 			// Check if remote was also modified (conflict).
-			// TODO: Implement remote change detection via Notion API.
-			// For now, assume no conflicts unless state indicates so.
+			// Note: Full remote change detection is handled by RemoteChangeDetector.
+			// This local-only detector uses stored state to detect previously-flagged conflicts.
+			// For integrated remote checking, use RemoteChangeDetector.DetectAllChanges().
 			if state.Status == "conflict" {
 				change.Type = ChangeConflict
 				change.Direction = DirectionBoth

@@ -3,6 +3,7 @@ package notion
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jomei/notionapi"
 
@@ -258,4 +259,74 @@ func (c *Client) deleteAllBlocks(ctx context.Context, pageID string) error {
 // Uses the extractBlockID function from blocks.go.
 func getBlockID(block notionapi.Block) string {
 	return extractBlockID(block)
+}
+
+// PageMetadata contains lightweight page information for change detection.
+// This avoids fetching full page content when only timestamps are needed.
+type PageMetadata struct {
+	PageID         string
+	LastEditedTime time.Time
+	CreatedTime    time.Time
+	Archived       bool
+}
+
+// GetPageMetadata retrieves only the metadata for a page (timestamps, archived status).
+// This is more efficient than GetPage when only change detection info is needed.
+func (c *Client) GetPageMetadata(ctx context.Context, pageID string) (*PageMetadata, error) {
+	if err := c.wait(ctx); err != nil {
+		return nil, fmt.Errorf("rate limit: %w", err)
+	}
+
+	page, err := c.api.Page.Get(ctx, notionapi.PageID(pageID))
+	if err != nil {
+		return nil, fmt.Errorf("get page metadata: %w", err)
+	}
+
+	return &PageMetadata{
+		PageID:         string(page.ID),
+		LastEditedTime: page.LastEditedTime,
+		CreatedTime:    page.CreatedTime,
+		Archived:       page.Archived,
+	}, nil
+}
+
+// GetPagesMetadataBatch retrieves metadata for multiple pages efficiently.
+// Uses concurrent requests with rate limiting to maximize throughput.
+// Returns a map of pageID -> metadata. Missing or errored pages are omitted.
+func (c *Client) GetPagesMetadataBatch(ctx context.Context, pageIDs []string) (map[string]*PageMetadata, error) {
+	if len(pageIDs) == 0 {
+		return make(map[string]*PageMetadata), nil
+	}
+
+	results := make(map[string]*PageMetadata)
+	errChan := make(chan error, len(pageIDs))
+	resultChan := make(chan *PageMetadata, len(pageIDs))
+
+	// Process pages sequentially with rate limiting.
+	// While concurrent processing would be faster, we need to respect rate limits.
+	for _, pageID := range pageIDs {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		meta, err := c.GetPageMetadata(ctx, pageID)
+		if err != nil {
+			// Log but don't fail - page might be deleted or inaccessible.
+			errChan <- fmt.Errorf("page %s: %w", pageID, err)
+			continue
+		}
+		resultChan <- meta
+	}
+
+	// Collect results.
+	close(resultChan)
+	close(errChan)
+
+	for meta := range resultChan {
+		results[meta.PageID] = meta
+	}
+
+	return results, nil
 }

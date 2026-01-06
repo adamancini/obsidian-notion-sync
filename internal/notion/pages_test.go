@@ -2,6 +2,7 @@ package notion
 
 import (
 	"testing"
+	"time"
 
 	"github.com/jomei/notionapi"
 )
@@ -185,5 +186,61 @@ func TestClientBatchSizeOption(t *testing.T) {
 				t.Errorf("batchSize = %d, expected %d", client.batchSize, tt.expected)
 			}
 		})
+	}
+}
+
+// TestPageMetadata verifies PageMetadata struct fields and behavior.
+func TestPageMetadata(t *testing.T) {
+	now := time.Now()
+	created := now.Add(-24 * time.Hour)
+
+	meta := &PageMetadata{
+		PageID:         "page-456",
+		LastEditedTime: now,
+		CreatedTime:    created,
+		Archived:       false,
+	}
+
+	if meta.PageID != "page-456" {
+		t.Errorf("PageID = %q, expected %q", meta.PageID, "page-456")
+	}
+
+	if !meta.LastEditedTime.Equal(now) {
+		t.Errorf("LastEditedTime = %v, expected %v", meta.LastEditedTime, now)
+	}
+
+	if !meta.CreatedTime.Equal(created) {
+		t.Errorf("CreatedTime = %v, expected %v", meta.CreatedTime, created)
+	}
+
+	if meta.Archived {
+		t.Error("Archived should be false")
+	}
+}
+
+// TestPageMetadata_Archived verifies archived page detection.
+func TestPageMetadata_Archived(t *testing.T) {
+	meta := &PageMetadata{
+		PageID:   "archived-page",
+		Archived: true,
+	}
+
+	if !meta.Archived {
+		t.Error("Archived should be true")
+	}
+}
+
+// TestPageMetadata_ZeroTime verifies behavior with zero time values.
+func TestPageMetadata_ZeroTime(t *testing.T) {
+	meta := &PageMetadata{
+		PageID: "new-page",
+	}
+
+	if !meta.LastEditedTime.IsZero() {
+		t.Error("LastEditedTime should be zero")
+	}
+
+	if !meta.CreatedTime.IsZero() {
+		t.Error("CreatedTime should be zero")
 	}
 }
