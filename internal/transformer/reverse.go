@@ -185,7 +185,7 @@ func (t *ReverseTransformer) blockToMarkdown(block notionapi.Block, depth int) s
 		return result.String()
 
 	case *notionapi.CodeBlock:
-		lang := string(b.Code.Language)
+		lang := b.Code.Language
 		if lang == "plain text" {
 			lang = ""
 		}

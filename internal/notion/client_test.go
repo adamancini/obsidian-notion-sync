@@ -131,7 +131,7 @@ func TestWaitWithContextCancellation(t *testing.T) {
 	// Wait should fail due to context cancellation.
 	err := client.wait(ctx)
 	if err == nil {
-		t.Error("expected error from cancelled context, got nil")
+		t.Error("expected error from canceled context, got nil")
 	}
 }
 
