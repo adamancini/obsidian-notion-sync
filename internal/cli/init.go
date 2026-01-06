@@ -144,7 +144,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 	// Parse each file to extract wiki-links and register them.
 	p := parser.New()
 	linkRegistry := state.NewLinkRegistry(db)
-	var totalLinks int
+	var totalLinks, totalAliases int
 
 	for _, file := range files {
 		content, err := scanner.ReadFile(file.Path)
@@ -175,6 +175,42 @@ func runInit(cmd *cobra.Command, args []string) error {
 			totalLinks += len(note.WikiLinks)
 		}
 
+		// Register aliases from frontmatter (title and aliases).
+		// This enables [[Title]] to resolve to filename.md when title differs from filename.
+		if title, ok := note.Frontmatter["title"].(string); ok && title != "" {
+			if err := linkRegistry.RegisterAlias(file.Path, title, "title"); err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "  Warning: failed to register title alias for %s: %v\n", file.Path, err)
+				}
+			} else {
+				totalAliases++
+			}
+		}
+
+		// Register frontmatter aliases array.
+		if aliases, ok := note.Frontmatter["aliases"]; ok {
+			var aliasStrings []string
+			switch v := aliases.(type) {
+			case []any:
+				for _, a := range v {
+					if s, ok := a.(string); ok && s != "" {
+						aliasStrings = append(aliasStrings, s)
+					}
+				}
+			case []string:
+				aliasStrings = v
+			}
+			if len(aliasStrings) > 0 {
+				if err := linkRegistry.RegisterAliases(file.Path, aliasStrings, "alias"); err != nil {
+					if verbose {
+						fmt.Fprintf(os.Stderr, "  Warning: failed to register aliases for %s: %v\n", file.Path, err)
+					}
+				} else {
+					totalAliases += len(aliasStrings)
+				}
+			}
+		}
+
 		// Create initial state entry (pending sync).
 		contentHashStr, err := state.HashFile(file.AbsPath)
 		if err != nil {
@@ -196,6 +232,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("  ✓ Found %d markdown files\n", len(files))
 	fmt.Printf("  ✓ Registered %d wiki-links\n", totalLinks)
+	fmt.Printf("  ✓ Registered %d aliases (titles/frontmatter)\n", totalAliases)
 
 	fmt.Println("\nInitialization complete!")
 	fmt.Println("\nNext steps:")
