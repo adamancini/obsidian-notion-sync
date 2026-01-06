@@ -3,6 +3,7 @@ package transformer
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/jomei/notionapi"
@@ -58,8 +59,14 @@ func (t *ReverseTransformer) NotionToMarkdown(page *NotionPage) ([]byte, error) 
 	frontmatter := t.propertiesToFrontmatter(page.Properties)
 	if len(frontmatter) > 0 {
 		buf.WriteString("---\n")
-		for key, value := range frontmatter {
-			buf.WriteString(fmt.Sprintf("%s: %v\n", key, value))
+		// Sort keys for deterministic output.
+		keys := make([]string, 0, len(frontmatter))
+		for key := range frontmatter {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			buf.WriteString(fmt.Sprintf("%s: %v\n", key, frontmatter[key]))
 		}
 		buf.WriteString("---\n\n")
 	}
