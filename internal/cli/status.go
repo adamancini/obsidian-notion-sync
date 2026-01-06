@@ -103,9 +103,9 @@ func runStatus(cmd *cobra.Command, args []string) error {
 
 	// Get link registry stats.
 	linkRegistry := state.NewLinkRegistry(db)
-	unresolvedLinks, err := linkRegistry.GetUnresolvedLinks()
+	linkStats, err := linkRegistry.GetStats()
 	if err != nil {
-		return fmt.Errorf("get unresolved links: %w", err)
+		return fmt.Errorf("get link stats: %w", err)
 	}
 
 	// Print summary.
@@ -118,8 +118,13 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	printStatusLine("Deleted", len(deletedFiles))
 	printStatusLine("Conflicts", len(conflicts))
 	printStatusLine("Synced", len(syncedStates))
+
+	// Print wiki-link statistics.
 	fmt.Println()
-	printStatusLine("Unresolved links", len(unresolvedLinks))
+	fmt.Println("Wiki-link resolution:")
+	printLinkStatusLine("Total links", linkStats.Total)
+	printLinkStatusLine("Resolved", linkStats.Resolved)
+	printLinkStatusLine("Unresolved", linkStats.Unresolved)
 
 	// Show details if requested.
 	if statusShowAll {
@@ -168,10 +173,10 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			}
 		}
 
-		if len(unresolvedLinks) > 0 && verbose {
-			fmt.Println("\nUnresolved wiki-links:")
-			for _, l := range unresolvedLinks {
-				fmt.Printf("  ? [[%s]] in %s\n", l.TargetName, l.SourcePath)
+		if linkStats.Unresolved > 0 && verbose {
+			fmt.Println("\nUnresolved wiki-links by source:")
+			for sourcePath, count := range linkStats.BySource {
+				fmt.Printf("  %s: %d unresolved\n", sourcePath, count)
 			}
 		}
 	}
@@ -186,4 +191,13 @@ func printStatusLine(label string, count int) {
 		note = "note"
 	}
 	fmt.Printf("  %-18s %4d %s\n", label+":", count, note)
+}
+
+// printLinkStatusLine prints a formatted status line for link counts.
+func printLinkStatusLine(label string, count int) {
+	link := "links"
+	if count == 1 {
+		link = "link"
+	}
+	fmt.Printf("  %-18s %4d %s\n", label+":", count, link)
 }
