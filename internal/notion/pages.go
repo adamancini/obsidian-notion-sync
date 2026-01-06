@@ -160,6 +160,47 @@ func (c *Client) ArchivePage(ctx context.Context, pageID string) error {
 	return nil
 }
 
+// DeletePage permanently deletes a page by archiving it.
+// Note: Notion API does not support permanent deletion via API.
+// This archives the page, which can be permanently deleted from Notion's trash.
+func (c *Client) DeletePage(ctx context.Context, pageID string) error {
+	// Notion API does not support permanent deletion, only archiving.
+	// Archived pages go to trash and can be manually deleted from there.
+	return c.ArchivePage(ctx, pageID)
+}
+
+// UpdatePageTitle updates the title property of a page.
+func (c *Client) UpdatePageTitle(ctx context.Context, pageID string, title string) error {
+	if err := c.wait(ctx); err != nil {
+		return fmt.Errorf("rate limit: %w", err)
+	}
+
+	// Create title property update.
+	// The title property in Notion is typically named "title" or "Name".
+	// We'll update the title property.
+	titleProp := notionapi.TitleProperty{
+		Title: []notionapi.RichText{
+			{
+				Type: notionapi.ObjectTypeText,
+				Text: &notionapi.Text{
+					Content: title,
+				},
+			},
+		},
+	}
+
+	_, err := c.api.Page.Update(ctx, notionapi.PageID(pageID), &notionapi.PageUpdateRequest{
+		Properties: notionapi.Properties{
+			"title": titleProp,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("update page title: %w", err)
+	}
+
+	return nil
+}
+
 // appendBlocks appends blocks to a page in batches.
 func (c *Client) appendBlocks(ctx context.Context, pageID string, blocks []notionapi.Block) error {
 	for i := 0; i < len(blocks); i += c.batchSize {

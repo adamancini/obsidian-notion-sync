@@ -19,6 +19,7 @@ const (
 	ChangeCreated  ChangeType = "created"
 	ChangeModified ChangeType = "modified"
 	ChangeDeleted  ChangeType = "deleted"
+	ChangeRenamed  ChangeType = "renamed"
 	ChangeConflict ChangeType = "conflict"
 )
 
@@ -33,13 +34,15 @@ const (
 
 // Change represents a detected change in the sync state.
 type Change struct {
-	Path       string
-	Type       ChangeType
-	Direction  Direction
-	LocalHash  string
-	RemoteHash string
-	LocalMtime time.Time
+	Path        string
+	OldPath     string // For renames: the previous path
+	Type        ChangeType
+	Direction   Direction
+	LocalHash   string
+	RemoteHash  string
+	LocalMtime  time.Time
 	RemoteMtime time.Time
+	State       *SyncState // Associated sync state (for renames/deletions)
 }
 
 // ChangeDetector detects changes between the local vault and sync state.
@@ -78,6 +81,10 @@ func (d *ChangeDetector) DetectChanges(ctx context.Context) ([]Change, error) {
 		stateMap[state.ObsidianPath] = state
 	}
 
+	// Track new files and their hashes for rename detection.
+	newFiles := make(map[string]fileWithHash) // path -> hash
+	deletedStates := make(map[string]*SyncState) // path -> state
+
 	// 3. Check each local file.
 	for path, info := range localFiles {
 		select {
@@ -89,13 +96,16 @@ func (d *ChangeDetector) DetectChanges(ctx context.Context) ([]Change, error) {
 		state, exists := stateMap[path]
 
 		if !exists {
-			// New local file - needs to be pushed.
-			changes = append(changes, Change{
-				Path:       path,
-				Type:       ChangeCreated,
-				Direction:  DirectionPush,
-				LocalMtime: info.ModTime(),
-			})
+			// New local file - compute hash for rename detection.
+			content, err := os.ReadFile(filepath.Join(d.vaultPath, path))
+			if err != nil {
+				continue // Skip files we can't read.
+			}
+			localHash := hashContent(content)
+			newFiles[path] = fileWithHash{
+				info: info,
+				hash: localHash,
+			}
 			continue
 		}
 
@@ -115,6 +125,7 @@ func (d *ChangeDetector) DetectChanges(ctx context.Context) ([]Change, error) {
 				Direction:  DirectionPush,
 				LocalHash:  localHash,
 				LocalMtime: info.ModTime(),
+				State:      state,
 			}
 
 			// Check if remote was also modified (conflict).
@@ -132,20 +143,69 @@ func (d *ChangeDetector) DetectChanges(ctx context.Context) ([]Change, error) {
 		delete(stateMap, path)
 	}
 
-	// 4. Check for deleted files (in state but not in vault).
+	// 4. Collect deleted files (in state but not in vault).
 	for path, state := range stateMap {
-		if state.NotionPageID != "" {
-			// File was synced but no longer exists locally.
+		if state.NotionPageID != "" && state.Status == "synced" {
+			deletedStates[path] = state
+		}
+	}
+
+	// 5. Detect renames by matching content hashes.
+	// A rename is when a deleted file's hash matches a new file's hash.
+	renamedPaths := make(map[string]bool) // Track which new paths are renames
+
+	for deletedPath, deletedState := range deletedStates {
+		for newPath, newFile := range newFiles {
+			if deletedState.ContentHash == newFile.hash {
+				// Found a rename: content hash matches.
+				changes = append(changes, Change{
+					Path:       newPath,
+					OldPath:    deletedPath,
+					Type:       ChangeRenamed,
+					Direction:  DirectionPush,
+					LocalHash:  newFile.hash,
+					LocalMtime: newFile.info.ModTime(),
+					State:      deletedState,
+				})
+				// Mark both as handled.
+				renamedPaths[newPath] = true
+				delete(deletedStates, deletedPath)
+				break // One deleted file can only be renamed to one new file.
+			}
+		}
+	}
+
+	// 6. Add remaining new files (not renames) as created.
+	for path, fh := range newFiles {
+		if !renamedPaths[path] {
 			changes = append(changes, Change{
 				Path:       path,
-				Type:       ChangeDeleted,
-				Direction:  DirectionPush, // Delete from Notion too.
-				RemoteHash: state.ContentHash,
+				Type:       ChangeCreated,
+				Direction:  DirectionPush,
+				LocalHash:  fh.hash,
+				LocalMtime: fh.info.ModTime(),
 			})
 		}
 	}
 
+	// 7. Add remaining deleted files (not renames) as deleted.
+	for path, state := range deletedStates {
+		changes = append(changes, Change{
+			Path:       path,
+			Type:       ChangeDeleted,
+			Direction:  DirectionPush,
+			RemoteHash: state.ContentHash,
+			State:      state,
+		})
+	}
+
 	return changes, nil
+}
+
+// fileWithHash holds file info and its content hash.
+type fileWithHash struct {
+	info fs.FileInfo
+	hash string
 }
 
 // DetectRemoteChanges checks Notion for pages modified since last sync.

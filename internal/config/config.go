@@ -96,6 +96,12 @@ type SyncConfig struct {
 	// ConflictStrategy: "local", "remote", "manual", or "newer".
 	ConflictStrategy string `yaml:"conflict_strategy"`
 
+	// DeletionStrategy: "archive", "delete", or "ignore".
+	// - archive: Set Notion page archived: true (soft delete, recoverable).
+	// - delete: Actually delete from Notion (dangerous, not recoverable).
+	// - ignore: Keep in Notion, just remove from sync_state.
+	DeletionStrategy string `yaml:"deletion_strategy"`
+
 	// Ignore patterns for files to skip.
 	Ignore []string `yaml:"ignore"`
 }
@@ -131,6 +137,7 @@ func DefaultConfig() *Config {
 		},
 		Sync: SyncConfig{
 			ConflictStrategy: "manual",
+			DeletionStrategy: "archive",
 			Ignore: []string{
 				"templates/**",
 				"**/.excalidraw.md",
@@ -249,6 +256,16 @@ func (c *Config) Validate() error {
 		}
 		if !validStrategies[c.Sync.ConflictStrategy] {
 			return fmt.Errorf("invalid conflict_strategy: %s (must be local, remote, manual, or newer)", c.Sync.ConflictStrategy)
+		}
+	}
+
+	// Validate deletion strategy if set.
+	if c.Sync.DeletionStrategy != "" {
+		validDeletionStrategies := map[string]bool{
+			"archive": true, "delete": true, "ignore": true,
+		}
+		if !validDeletionStrategies[c.Sync.DeletionStrategy] {
+			return fmt.Errorf("invalid deletion_strategy: %s (must be archive, delete, or ignore)", c.Sync.DeletionStrategy)
 		}
 	}
 

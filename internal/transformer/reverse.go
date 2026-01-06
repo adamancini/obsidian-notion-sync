@@ -31,6 +31,25 @@ func NewReverse(lookup PathLookup, cfg *Config) *ReverseTransformer {
 	}
 }
 
+// Transform converts Notion blocks to Obsidian-flavored markdown.
+// This is the main entry point for block-level conversion.
+func (rt *ReverseTransformer) Transform(blocks []notionapi.Block) (string, error) {
+	var buf bytes.Buffer
+
+	for _, block := range blocks {
+		md := rt.blockToMarkdown(block, 0)
+		buf.WriteString(md)
+	}
+
+	return buf.String(), nil
+}
+
+// TransformRichText converts Notion rich text to markdown string.
+// This is the main entry point for inline text conversion.
+func (rt *ReverseTransformer) TransformRichText(richText []notionapi.RichText) string {
+	return rt.richTextToMarkdown(richText)
+}
+
 // NotionToMarkdown converts a Notion page to Obsidian-flavored markdown.
 func (t *ReverseTransformer) NotionToMarkdown(page *NotionPage) ([]byte, error) {
 	var buf bytes.Buffer
@@ -58,9 +77,6 @@ func (t *ReverseTransformer) NotionToMarkdown(page *NotionPage) ([]byte, error) 
 func (t *ReverseTransformer) blockToMarkdown(block notionapi.Block, depth int) string {
 	indent := strings.Repeat("  ", depth)
 
-	// TODO: Implement full block conversion
-	// This is a stub that handles the basic cases
-
 	switch b := block.(type) {
 	case *notionapi.Heading1Block:
 		return "# " + t.richTextToMarkdown(b.Heading1.RichText) + "\n\n"
@@ -76,18 +92,23 @@ func (t *ReverseTransformer) blockToMarkdown(block notionapi.Block, depth int) s
 		if text == "" {
 			return "\n"
 		}
-		return text + "\n\n"
+		result := indent + text + "\n\n"
+		// Handle nested children.
+		result += t.transformChildren(b.Paragraph.Children, depth+1)
+		return result
 
 	case *notionapi.BulletedListItemBlock:
 		text := t.richTextToMarkdown(b.BulletedListItem.RichText)
 		result := indent + "- " + text + "\n"
-		// TODO: Handle nested children
+		// Handle nested children.
+		result += t.transformChildren(b.BulletedListItem.Children, depth+1)
 		return result
 
 	case *notionapi.NumberedListItemBlock:
 		text := t.richTextToMarkdown(b.NumberedListItem.RichText)
 		result := indent + "1. " + text + "\n"
-		// TODO: Handle nested children
+		// Handle nested children.
+		result += t.transformChildren(b.NumberedListItem.Children, depth+1)
 		return result
 
 	case *notionapi.ToDoBlock:
@@ -96,14 +117,26 @@ func (t *ReverseTransformer) blockToMarkdown(block notionapi.Block, depth int) s
 			checkbox = "[x]"
 		}
 		text := t.richTextToMarkdown(b.ToDo.RichText)
-		return indent + "- " + checkbox + " " + text + "\n"
+		result := indent + "- " + checkbox + " " + text + "\n"
+		// Handle nested children.
+		result += t.transformChildren(b.ToDo.Children, depth+1)
+		return result
 
 	case *notionapi.QuoteBlock:
 		text := t.richTextToMarkdown(b.Quote.RichText)
 		lines := strings.Split(text, "\n")
 		var result strings.Builder
 		for _, line := range lines {
-			result.WriteString("> " + line + "\n")
+			result.WriteString(indent + "> " + line + "\n")
+		}
+		// Handle nested children.
+		childMd := t.transformChildren(b.Quote.Children, depth)
+		if childMd != "" {
+			// Prefix each line with > for quote context.
+			childLines := strings.Split(strings.TrimSuffix(childMd, "\n"), "\n")
+			for _, line := range childLines {
+				result.WriteString(indent + "> " + line + "\n")
+			}
 		}
 		result.WriteString("\n")
 		return result.String()
@@ -115,18 +148,39 @@ func (t *ReverseTransformer) blockToMarkdown(block notionapi.Block, depth int) s
 		}
 		calloutType := t.iconToCalloutType(icon)
 		text := t.richTextToMarkdown(b.Callout.RichText)
-		return fmt.Sprintf("> [!%s]\n> %s\n\n", calloutType, text)
+		// Format callout text: wrap lines with > prefix.
+		lines := strings.Split(text, "\n")
+		var result strings.Builder
+		result.WriteString(fmt.Sprintf("%s> [!%s]\n", indent, calloutType))
+		for _, line := range lines {
+			if line != "" {
+				result.WriteString(fmt.Sprintf("%s> %s\n", indent, line))
+			}
+		}
+		// Handle nested children.
+		childMd := t.transformChildren(b.Callout.Children, depth)
+		if childMd != "" {
+			childLines := strings.Split(strings.TrimSuffix(childMd, "\n"), "\n")
+			for _, line := range childLines {
+				result.WriteString(indent + "> " + line + "\n")
+			}
+		}
+		result.WriteString("\n")
+		return result.String()
 
 	case *notionapi.CodeBlock:
 		lang := string(b.Code.Language)
-		code := t.richTextToMarkdown(b.Code.RichText)
-		return fmt.Sprintf("```%s\n%s\n```\n\n", lang, code)
+		if lang == "plain text" {
+			lang = ""
+		}
+		code := t.richTextToPlainText(b.Code.RichText)
+		return fmt.Sprintf("%s```%s\n%s\n```\n\n", indent, lang, code)
 
 	case *notionapi.DividerBlock:
-		return "---\n\n"
+		return indent + "---\n\n"
 
 	case *notionapi.EquationBlock:
-		return fmt.Sprintf("$$\n%s\n$$\n\n", b.Equation.Expression)
+		return fmt.Sprintf("%s$$\n%s\n$$\n\n", indent, b.Equation.Expression)
 
 	case *notionapi.ImageBlock:
 		url := ""
@@ -137,14 +191,138 @@ func (t *ReverseTransformer) blockToMarkdown(block notionapi.Block, depth int) s
 		}
 		caption := t.richTextToMarkdown(b.Image.Caption)
 		if caption != "" {
-			return fmt.Sprintf("![%s](%s)\n\n", caption, url)
+			return fmt.Sprintf("%s![%s](%s)\n\n", indent, caption, url)
 		}
-		return fmt.Sprintf("![](%s)\n\n", url)
+		return fmt.Sprintf("%s![](%s)\n\n", indent, url)
+
+	case *notionapi.TableBlock:
+		return t.tableToMarkdown(b, depth)
+
+	case *notionapi.TableRowBlock:
+		// Table rows are handled by tableToMarkdown, skip here.
+		return ""
+
+	case *notionapi.ToggleBlock:
+		text := t.richTextToMarkdown(b.Toggle.RichText)
+		result := fmt.Sprintf("%s- %s\n", indent, text)
+		// Handle nested children.
+		result += t.transformChildren(b.Toggle.Children, depth+1)
+		return result
+
+	case *notionapi.BookmarkBlock:
+		url := ""
+		if b.Bookmark.URL != "" {
+			url = b.Bookmark.URL
+		}
+		caption := t.richTextToMarkdown(b.Bookmark.Caption)
+		if caption != "" {
+			return fmt.Sprintf("%s[%s](%s)\n\n", indent, caption, url)
+		}
+		return fmt.Sprintf("%s<%s>\n\n", indent, url)
+
+	case *notionapi.EmbedBlock:
+		return fmt.Sprintf("%s<%s>\n\n", indent, b.Embed.URL)
+
+	case *notionapi.VideoBlock:
+		url := ""
+		if b.Video.File != nil {
+			url = b.Video.File.URL
+		} else if b.Video.External != nil {
+			url = b.Video.External.URL
+		}
+		return fmt.Sprintf("%s![video](%s)\n\n", indent, url)
+
+	case *notionapi.FileBlock:
+		url := ""
+		if b.File.File != nil {
+			url = b.File.File.URL
+		} else if b.File.External != nil {
+			url = b.File.External.URL
+		}
+		caption := t.richTextToMarkdown(b.File.Caption)
+		if caption != "" {
+			return fmt.Sprintf("%s[%s](%s)\n\n", indent, caption, url)
+		}
+		return fmt.Sprintf("%s[file](%s)\n\n", indent, url)
+
+	case *notionapi.PdfBlock:
+		url := ""
+		if b.Pdf.File != nil {
+			url = b.Pdf.File.URL
+		} else if b.Pdf.External != nil {
+			url = b.Pdf.External.URL
+		}
+		return fmt.Sprintf("%s[PDF](%s)\n\n", indent, url)
 
 	default:
-		// Unknown block type, skip or add comment
+		// Unknown block type, skip.
 		return ""
 	}
+}
+
+// transformChildren recursively transforms child blocks.
+func (t *ReverseTransformer) transformChildren(children []notionapi.Block, depth int) string {
+	if len(children) == 0 {
+		return ""
+	}
+
+	var result strings.Builder
+	for _, child := range children {
+		result.WriteString(t.blockToMarkdown(child, depth))
+	}
+	return result.String()
+}
+
+// tableToMarkdown converts a Notion table block to markdown table format.
+func (t *ReverseTransformer) tableToMarkdown(table *notionapi.TableBlock, depth int) string {
+	indent := strings.Repeat("  ", depth)
+	var result strings.Builder
+
+	if len(table.Table.Children) == 0 {
+		return ""
+	}
+
+	// Process table rows.
+	for i, child := range table.Table.Children {
+		row, ok := child.(*notionapi.TableRowBlock)
+		if !ok {
+			continue
+		}
+
+		// Build row content.
+		result.WriteString(indent + "|")
+		for _, cell := range row.TableRow.Cells {
+			cellContent := t.richTextToMarkdown(cell)
+			// Escape pipe characters in cell content.
+			cellContent = strings.ReplaceAll(cellContent, "|", "\\|")
+			result.WriteString(" " + cellContent + " |")
+		}
+		result.WriteString("\n")
+
+		// Add separator after header row (if table has column header).
+		if i == 0 && table.Table.HasColumnHeader {
+			result.WriteString(indent + "|")
+			for range row.TableRow.Cells {
+				result.WriteString(" --- |")
+			}
+			result.WriteString("\n")
+		}
+	}
+
+	result.WriteString("\n")
+	return result.String()
+}
+
+// richTextToPlainText extracts plain text from rich text without markdown formatting.
+// Used for code blocks where we don't want to apply formatting.
+func (t *ReverseTransformer) richTextToPlainText(richText []notionapi.RichText) string {
+	var result strings.Builder
+
+	for _, rt := range richText {
+		result.WriteString(rt.PlainText)
+	}
+
+	return result.String()
 }
 
 // richTextToMarkdown converts Notion rich text to markdown.
@@ -153,6 +331,12 @@ func (t *ReverseTransformer) richTextToMarkdown(richText []notionapi.RichText) s
 
 	for _, rt := range richText {
 		text := rt.PlainText
+
+		// Handle equations (inline math).
+		if rt.Type == "equation" && rt.Equation != nil {
+			result.WriteString("$" + rt.Equation.Expression + "$")
+			continue
+		}
 
 		// Handle mentions (convert back to wiki-links).
 		if rt.Type == "mention" && rt.Mention != nil {
@@ -170,10 +354,27 @@ func (t *ReverseTransformer) richTextToMarkdown(richText []notionapi.RichText) s
 				result.WriteString(text)
 				continue
 			}
+			// Handle date mentions.
+			if rt.Mention.Type == "date" && rt.Mention.Date != nil {
+				result.WriteString(rt.PlainText)
+				continue
+			}
+			// Handle user mentions.
+			if rt.Mention.Type == "user" && rt.Mention.User != nil {
+				result.WriteString("@" + rt.PlainText)
+				continue
+			}
 		}
 
-		// Apply annotations.
+		// Apply annotations in the correct order.
+		// Order matters: innermost first, then outer wrappers.
 		if rt.Annotations != nil {
+			// Handle highlight (yellow background = Obsidian highlight).
+			// This should wrap the content before other formatting.
+			if rt.Annotations.Color == notionapi.ColorYellowBackground {
+				text = "==" + text + "=="
+			}
+
 			if rt.Annotations.Code {
 				text = "`" + text + "`"
 			}
@@ -186,13 +387,9 @@ func (t *ReverseTransformer) richTextToMarkdown(richText []notionapi.RichText) s
 			if rt.Annotations.Bold {
 				text = "**" + text + "**"
 			}
-			// Handle highlight (yellow background = Obsidian highlight)
-			if rt.Annotations.Color == notionapi.ColorYellowBackground {
-				text = "==" + text + "=="
-			}
 		}
 
-		// Handle links.
+		// Handle links (external URLs).
 		if rt.Text != nil && rt.Text.Link != nil {
 			text = "[" + text + "](" + rt.Text.Link.Url + ")"
 		}

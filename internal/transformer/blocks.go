@@ -134,6 +134,10 @@ func (t *Transformer) transformTaskItem(li *ast.ListItem, source []byte) notiona
 	}
 }
 
+// notionRichTextMaxLength is the maximum length allowed for a single rich_text content.
+// Notion API limits this to 2000 characters.
+const notionRichTextMaxLength = 2000
+
 // transformCodeBlock converts a fenced code block to a Notion code block.
 func (t *Transformer) transformCodeBlock(cb *ast.FencedCodeBlock, source []byte) notionapi.Block {
 	// Get language.
@@ -153,6 +157,9 @@ func (t *Transformer) transformCodeBlock(cb *ast.FencedCodeBlock, source []byte)
 	// Trim trailing newline.
 	code := strings.TrimSuffix(content.String(), "\n")
 
+	// Split code into chunks if it exceeds the Notion rich_text limit.
+	richTextSegments := splitCodeContent(code, notionRichTextMaxLength)
+
 	return &notionapi.CodeBlock{
 		BasicBlock: notionapi.BasicBlock{
 			Object: notionapi.ObjectTypeBlock,
@@ -160,14 +167,66 @@ func (t *Transformer) transformCodeBlock(cb *ast.FencedCodeBlock, source []byte)
 		},
 		Code: notionapi.Code{
 			Language: lang,
-			RichText: []notionapi.RichText{
-				{
-					Type: notionapi.ObjectTypeText,
-					Text: &notionapi.Text{Content: code},
-				},
-			},
+			RichText: richTextSegments,
 		},
 	}
+}
+
+// splitCodeContent splits code content into multiple rich_text segments,
+// each not exceeding maxLen characters. Prefers splitting at newline boundaries.
+func splitCodeContent(code string, maxLen int) []notionapi.RichText {
+	if len(code) <= maxLen {
+		return []notionapi.RichText{
+			{
+				Type: notionapi.ObjectTypeText,
+				Text: &notionapi.Text{Content: code},
+			},
+		}
+	}
+
+	var segments []notionapi.RichText
+	remaining := code
+
+	for len(remaining) > 0 {
+		if len(remaining) <= maxLen {
+			// Last segment fits entirely.
+			segments = append(segments, notionapi.RichText{
+				Type: notionapi.ObjectTypeText,
+				Text: &notionapi.Text{Content: remaining},
+			})
+			break
+		}
+
+		// Find a good split point - prefer newline boundaries.
+		splitPoint := findSplitPoint(remaining, maxLen)
+		chunk := remaining[:splitPoint]
+		remaining = remaining[splitPoint:]
+
+		segments = append(segments, notionapi.RichText{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: chunk},
+		})
+	}
+
+	return segments
+}
+
+// findSplitPoint finds the best position to split the text, preferring newlines.
+// Returns a position <= maxLen.
+func findSplitPoint(text string, maxLen int) int {
+	if len(text) <= maxLen {
+		return len(text)
+	}
+
+	// Look for the last newline within the maxLen range.
+	lastNewline := strings.LastIndex(text[:maxLen], "\n")
+	if lastNewline > 0 {
+		// Include the newline in this chunk.
+		return lastNewline + 1
+	}
+
+	// No newline found, split at maxLen.
+	return maxLen
 }
 
 // transformQuote converts a blockquote to a Notion quote block.
@@ -405,17 +464,27 @@ func isTaskChecked(li *ast.ListItem, source []byte) bool {
 }
 
 // transformListItemContent extracts rich text from a list item's first paragraph.
+// Returns an empty slice (not nil) if the list item has no content.
 func (t *Transformer) transformListItemContent(li *ast.ListItem, source []byte) []notionapi.RichText {
 	// List items typically contain a TextBlock or Paragraph as first child.
 	for child := li.FirstChild(); child != nil; child = child.NextSibling() {
 		switch c := child.(type) {
 		case *ast.TextBlock:
-			return t.transformInlineContent(c, source)
+			result := t.transformInlineContent(c, source)
+			if result == nil {
+				return []notionapi.RichText{}
+			}
+			return result
 		case *ast.Paragraph:
-			return t.transformInlineContent(c, source)
+			result := t.transformInlineContent(c, source)
+			if result == nil {
+				return []notionapi.RichText{}
+			}
+			return result
 		}
 	}
-	return nil
+	// Return empty slice, not nil - Notion API requires array, not null.
+	return []notionapi.RichText{}
 }
 
 // transformBlockquoteContent extracts content from a blockquote.

@@ -1,6 +1,8 @@
 package transformer
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jomei/notionapi"
@@ -758,4 +760,312 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// TestTransformCodeBlock_LongContent tests that code blocks exceeding 2000 chars
+// are split into multiple rich_text segments (ANN-26).
+func TestTransformCodeBlock_LongContent(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	// Create a code block with more than 2000 characters.
+	// Use a pattern that creates predictable line boundaries.
+	var longCode strings.Builder
+	longCode.WriteString("```go\n")
+	// Write 50-character lines until we exceed 4000 chars (to ensure multiple splits).
+	for i := 0; longCode.Len() < 4500; i++ {
+		longCode.WriteString("// This is line number ")
+		longCode.WriteString(fmt.Sprintf("%04d", i))
+		longCode.WriteString(" of the test code file\n")
+	}
+	longCode.WriteString("```\n")
+
+	note, err := p.Parse("test.md", []byte(longCode.String()))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find code block.
+	var codeBlock *notionapi.CodeBlock
+	for _, block := range page.Children {
+		if block.GetType() == notionapi.BlockTypeCode {
+			codeBlock = block.(*notionapi.CodeBlock)
+			break
+		}
+	}
+
+	if codeBlock == nil {
+		t.Fatal("code block not found")
+	}
+
+	// Should have multiple rich_text segments.
+	if len(codeBlock.Code.RichText) < 2 {
+		t.Errorf("expected multiple rich_text segments for long code, got %d", len(codeBlock.Code.RichText))
+	}
+
+	// Each segment should be <= 2000 characters.
+	for i, rt := range codeBlock.Code.RichText {
+		if rt.Text == nil {
+			t.Errorf("segment %d has nil Text", i)
+			continue
+		}
+		if len(rt.Text.Content) > 2000 {
+			t.Errorf("segment %d has length %d, expected <= 2000", i, len(rt.Text.Content))
+		}
+	}
+
+	// Verify the total content is preserved.
+	var reconstructed strings.Builder
+	for _, rt := range codeBlock.Code.RichText {
+		if rt.Text != nil {
+			reconstructed.WriteString(rt.Text.Content)
+		}
+	}
+
+	// The original code (minus the fence markers and trailing newline).
+	originalCode := longCode.String()
+	// Strip ```go\n from start and ```\n from end.
+	originalCode = originalCode[6:]                              // Remove "```go\n"
+	originalCode = originalCode[:len(originalCode)-5]            // Remove "\n```\n"
+	originalCode = strings.TrimSuffix(originalCode, "\n")        // Transformer trims trailing newline
+
+	if reconstructed.String() != originalCode {
+		t.Errorf("reconstructed code does not match original\ngot length: %d\nwant length: %d",
+			reconstructed.Len(), len(originalCode))
+	}
+}
+
+// TestTransformCodeBlock_ExactlyAtLimit tests code blocks exactly at the 2000 char limit.
+func TestTransformCodeBlock_ExactlyAtLimit(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	// Create code exactly 2000 characters.
+	code := strings.Repeat("x", 2000)
+	content := "```go\n" + code + "\n```\n"
+
+	note, err := p.Parse("test.md", []byte(content))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find code block.
+	var codeBlock *notionapi.CodeBlock
+	for _, block := range page.Children {
+		if block.GetType() == notionapi.BlockTypeCode {
+			codeBlock = block.(*notionapi.CodeBlock)
+			break
+		}
+	}
+
+	if codeBlock == nil {
+		t.Fatal("code block not found")
+	}
+
+	// Should have exactly 1 segment (code is at the limit, not over).
+	if len(codeBlock.Code.RichText) != 1 {
+		t.Errorf("expected 1 rich_text segment for code at limit, got %d", len(codeBlock.Code.RichText))
+	}
+}
+
+// TestTransformListItemContent_Empty tests that transformListItemContent
+// returns an empty slice, not nil, when the list item has no content (ANN-27).
+func TestTransformListItemContent_Empty(t *testing.T) {
+	tr := New(nil, nil)
+
+	// Create an empty list item manually using goldmark AST.
+	listItem := ast.NewListItem(0)
+	// Add an empty text block child (simulating an empty list item).
+	textBlock := ast.NewTextBlock()
+	listItem.AppendChild(listItem, textBlock)
+
+	source := []byte{}
+	result := tr.transformListItemContent(listItem, source)
+
+	// Result should not be nil - it should be an empty slice.
+	if result == nil {
+		t.Error("transformListItemContent returned nil for empty list item, expected empty slice")
+	}
+}
+
+// TestTransformList_EmptyBulletedItem tests that empty bulleted list items
+// produce an empty array, not null (ANN-27).
+func TestTransformList_EmptyBulletedItem(t *testing.T) {
+	tr := New(nil, nil)
+
+	// Create a list with an empty item using goldmark AST directly.
+	list := ast.NewList('-')
+	list.IsOrdered()
+
+	listItem := ast.NewListItem(0)
+	textBlock := ast.NewTextBlock()
+	listItem.AppendChild(listItem, textBlock)
+	list.AppendChild(list, listItem)
+
+	doc := ast.NewDocument()
+	doc.AppendChild(doc, list)
+
+	note := &parser.ParsedNote{
+		Path:   "test.md",
+		AST:    doc,
+		Source: []byte{},
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find the bulleted list item.
+	var bulletItem *notionapi.BulletedListItemBlock
+	for _, block := range page.Children {
+		if bi, ok := block.(*notionapi.BulletedListItemBlock); ok {
+			bulletItem = bi
+			break
+		}
+	}
+
+	if bulletItem == nil {
+		t.Fatal("bulleted list item not found")
+	}
+
+	// RichText should not be nil - it should be an empty slice.
+	if bulletItem.BulletedListItem.RichText == nil {
+		t.Error("empty bulleted list item has nil RichText, expected empty slice")
+	}
+}
+
+// TestTransformList_EmptyNumberedItem tests that empty numbered list items
+// produce an empty array, not null (ANN-27).
+func TestTransformList_EmptyNumberedItem(t *testing.T) {
+	tr := New(nil, nil)
+
+	// Create an ordered list with an empty item using goldmark AST directly.
+	list := ast.NewList('.')
+	list.Start = 1
+
+	listItem := ast.NewListItem(0)
+	textBlock := ast.NewTextBlock()
+	listItem.AppendChild(listItem, textBlock)
+	list.AppendChild(list, listItem)
+
+	doc := ast.NewDocument()
+	doc.AppendChild(doc, list)
+
+	note := &parser.ParsedNote{
+		Path:   "test.md",
+		AST:    doc,
+		Source: []byte{},
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find the numbered list item.
+	var numberedItem *notionapi.NumberedListItemBlock
+	for _, block := range page.Children {
+		if ni, ok := block.(*notionapi.NumberedListItemBlock); ok {
+			numberedItem = ni
+			break
+		}
+	}
+
+	if numberedItem == nil {
+		t.Fatal("numbered list item not found")
+	}
+
+	// RichText should not be nil - it should be an empty slice.
+	if numberedItem.NumberedListItem.RichText == nil {
+		t.Error("empty numbered list item has nil RichText, expected empty slice")
+	}
+}
+
+// TestSplitCodeContent tests the splitCodeContent helper function directly.
+func TestSplitCodeContent(t *testing.T) {
+	tests := []struct {
+		name           string
+		code           string
+		maxLen         int
+		wantSegments   int
+		wantAllUnder   bool
+	}{
+		{
+			name:         "short code",
+			code:         "hello world",
+			maxLen:       100,
+			wantSegments: 1,
+			wantAllUnder: true,
+		},
+		{
+			name:         "exactly at limit",
+			code:         strings.Repeat("x", 100),
+			maxLen:       100,
+			wantSegments: 1,
+			wantAllUnder: true,
+		},
+		{
+			name:         "just over limit no newlines",
+			code:         strings.Repeat("x", 150),
+			maxLen:       100,
+			wantSegments: 2,
+			wantAllUnder: true,
+		},
+		{
+			name:         "split at newline",
+			code:         strings.Repeat("x", 50) + "\n" + strings.Repeat("y", 50) + "\n" + strings.Repeat("z", 50),
+			maxLen:       100,
+			wantSegments: 3, // 51 chars + newline, 51 chars + newline, 50 chars.
+			wantAllUnder: true,
+		},
+		{
+			name:         "multiple splits needed",
+			code:         strings.Repeat("line\n", 100), // 500 chars
+			maxLen:       100,
+			wantSegments: 5,
+			wantAllUnder: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			segments := splitCodeContent(tt.code, tt.maxLen)
+
+			if len(segments) != tt.wantSegments {
+				t.Errorf("got %d segments, want %d", len(segments), tt.wantSegments)
+			}
+
+			// Verify all segments are under the limit.
+			if tt.wantAllUnder {
+				for i, seg := range segments {
+					if seg.Text != nil && len(seg.Text.Content) > tt.maxLen {
+						t.Errorf("segment %d has length %d, exceeds max %d",
+							i, len(seg.Text.Content), tt.maxLen)
+					}
+				}
+			}
+
+			// Verify content is preserved.
+			var reconstructed strings.Builder
+			for _, seg := range segments {
+				if seg.Text != nil {
+					reconstructed.WriteString(seg.Text.Content)
+				}
+			}
+			if reconstructed.String() != tt.code {
+				t.Errorf("content not preserved after split")
+			}
+		})
+	}
 }

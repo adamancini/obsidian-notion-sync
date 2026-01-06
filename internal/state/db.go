@@ -197,6 +197,12 @@ func (db *DB) DeleteState(path string) error {
 	return err
 }
 
+// UpdatePath updates the obsidian_path for a sync state (used for renames).
+func (db *DB) UpdatePath(oldPath, newPath string) error {
+	_, err := db.conn.Exec(`UPDATE sync_state SET obsidian_path = ? WHERE obsidian_path = ?`, newPath, oldPath)
+	return err
+}
+
 // ListStates returns all sync states matching the given status filter.
 // If status is empty, returns all states.
 func (db *DB) ListStates(status string) ([]*SyncState, error) {
@@ -268,6 +274,58 @@ func (db *DB) ListStates(status string) ([]*SyncState, error) {
 	}
 
 	return states, rows.Err()
+}
+
+// GetStateByNotionID retrieves the sync state for a given Notion page ID.
+func (db *DB) GetStateByNotionID(pageID string) (*SyncState, error) {
+	row := db.conn.QueryRow(`
+		SELECT id, obsidian_path, notion_page_id, notion_parent_id,
+		       content_hash, frontmatter_hash, obsidian_mtime, notion_mtime,
+		       last_sync, sync_direction, status
+		FROM sync_state
+		WHERE notion_page_id = ?
+	`, pageID)
+
+	state := &SyncState{}
+	var obsidianMtime, notionMtime, lastSync sql.NullInt64
+	var notionPageID, notionParentID, frontmatterHash, syncDirection sql.NullString
+
+	err := row.Scan(
+		&state.ID, &state.ObsidianPath, &notionPageID, &notionParentID,
+		&state.ContentHash, &frontmatterHash, &obsidianMtime, &notionMtime,
+		&lastSync, &syncDirection, &state.Status,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("scan state: %w", err)
+	}
+
+	// Convert nullable fields.
+	if notionPageID.Valid {
+		state.NotionPageID = notionPageID.String
+	}
+	if notionParentID.Valid {
+		state.NotionParentID = notionParentID.String
+	}
+	if frontmatterHash.Valid {
+		state.FrontmatterHash = frontmatterHash.String
+	}
+	if syncDirection.Valid {
+		state.SyncDirection = syncDirection.String
+	}
+	if obsidianMtime.Valid {
+		state.ObsidianMtime = time.Unix(obsidianMtime.Int64, 0)
+	}
+	if notionMtime.Valid {
+		state.NotionMtime = time.Unix(notionMtime.Int64, 0)
+	}
+	if lastSync.Valid {
+		state.LastSync = time.Unix(lastSync.Int64, 0)
+	}
+
+	return state, nil
 }
 
 // GetConfig retrieves a configuration value.

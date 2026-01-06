@@ -70,6 +70,13 @@ func (r *LinkRegistry) ClearLinksFrom(sourcePath string) error {
 	return err
 }
 
+// UpdateSourcePath updates all links from an old source path to a new source path.
+// Used when handling file renames.
+func (r *LinkRegistry) UpdateSourcePath(oldPath, newPath string) error {
+	_, err := r.db.conn.Exec(`UPDATE links SET source_path = ? WHERE source_path = ?`, newPath, oldPath)
+	return err
+}
+
 // Resolve looks up a wiki-link target and returns the Notion page ID.
 // This implements the transformer.LinkResolver interface.
 func (r *LinkRegistry) Resolve(target string) (notionPageID string, found bool) {
