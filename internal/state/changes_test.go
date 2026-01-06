@@ -227,3 +227,387 @@ func TestDetectModifications(t *testing.T) {
 		t.Errorf("expected DirectionPush, got %v", change.Direction)
 	}
 }
+
+func TestDetectFrontmatterOnlyModification(t *testing.T) {
+	// Create temporary directory for test vault.
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create test database.
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	// Original content with frontmatter.
+	originalContent := []byte(`---
+title: Original Title
+tags:
+  - tag1
+---
+# Body Content
+
+This body stays the same.
+`)
+
+	// Modified content - only frontmatter changed.
+	modifiedContent := []byte(`---
+title: Changed Title
+tags:
+  - tag1
+  - tag2
+---
+# Body Content
+
+This body stays the same.
+`)
+
+	// Compute hashes for the original content.
+	originalHashes := HashContent(originalContent)
+
+	// Write the modified file to disk.
+	err = os.WriteFile(filepath.Join(tmpDir, "note-with-fm.md"), modifiedContent, 0644)
+	if err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// Set up sync state with original hashes.
+	err = db.SetState(&SyncState{
+		ObsidianPath:    "note-with-fm.md",
+		NotionPageID:    "page-fm-test",
+		ContentHash:     originalHashes.ContentHash,     // Body hash
+		FrontmatterHash: originalHashes.FrontmatterHash, // Frontmatter hash
+		Status:          "synced",
+	})
+	if err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+
+	// Detect changes.
+	detector := NewChangeDetector(db, tmpDir)
+	changes, err := detector.DetectChanges(context.Background())
+	if err != nil {
+		t.Fatalf("detect changes: %v", err)
+	}
+
+	// Should have exactly one change.
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d", len(changes))
+	}
+
+	change := changes[0]
+	if change.Type != ChangeModified {
+		t.Errorf("expected ChangeModified, got %v", change.Type)
+	}
+
+	// Verify FrontmatterOnly flag is set.
+	if !change.FrontmatterOnly {
+		t.Error("expected FrontmatterOnly to be true for frontmatter-only change")
+	}
+}
+
+func TestDetectBodyOnlyModification(t *testing.T) {
+	// Create temporary directory for test vault.
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create test database.
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	// Original content with frontmatter.
+	originalContent := []byte(`---
+title: Same Title
+---
+# Original Body
+
+This is the original body.
+`)
+
+	// Modified content - only body changed.
+	modifiedContent := []byte(`---
+title: Same Title
+---
+# Modified Body
+
+This body has been changed.
+`)
+
+	// Compute hashes for the original content.
+	originalHashes := HashContent(originalContent)
+
+	// Write the modified file to disk.
+	err = os.WriteFile(filepath.Join(tmpDir, "note-body-change.md"), modifiedContent, 0644)
+	if err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// Set up sync state with original hashes.
+	err = db.SetState(&SyncState{
+		ObsidianPath:    "note-body-change.md",
+		NotionPageID:    "page-body-test",
+		ContentHash:     originalHashes.ContentHash,
+		FrontmatterHash: originalHashes.FrontmatterHash,
+		Status:          "synced",
+	})
+	if err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+
+	// Detect changes.
+	detector := NewChangeDetector(db, tmpDir)
+	changes, err := detector.DetectChanges(context.Background())
+	if err != nil {
+		t.Fatalf("detect changes: %v", err)
+	}
+
+	// Should have exactly one change.
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d", len(changes))
+	}
+
+	change := changes[0]
+	if change.Type != ChangeModified {
+		t.Errorf("expected ChangeModified, got %v", change.Type)
+	}
+
+	// Verify FrontmatterOnly flag is NOT set (body changed).
+	if change.FrontmatterOnly {
+		t.Error("expected FrontmatterOnly to be false when body content changed")
+	}
+}
+
+func TestDetectNoChangeWhenHashesMatch(t *testing.T) {
+	// Create temporary directory for test vault.
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create test database.
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	// Content for the file.
+	content := []byte(`---
+title: Unchanged Note
+---
+# Body Content
+
+This content has not changed.
+`)
+
+	// Compute hashes.
+	hashes := HashContent(content)
+
+	// Write file to disk.
+	err = os.WriteFile(filepath.Join(tmpDir, "unchanged.md"), content, 0644)
+	if err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// Set up sync state with matching hashes.
+	err = db.SetState(&SyncState{
+		ObsidianPath:    "unchanged.md",
+		NotionPageID:    "page-unchanged",
+		ContentHash:     hashes.ContentHash,
+		FrontmatterHash: hashes.FrontmatterHash,
+		Status:          "synced",
+	})
+	if err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+
+	// Detect changes.
+	detector := NewChangeDetector(db, tmpDir)
+	changes, err := detector.DetectChanges(context.Background())
+	if err != nil {
+		t.Fatalf("detect changes: %v", err)
+	}
+
+	// Should have no changes when content matches stored hashes.
+	if len(changes) != 0 {
+		t.Errorf("expected 0 changes for unchanged file, got %d", len(changes))
+		for _, c := range changes {
+			t.Logf("  unexpected change: type=%v path=%s", c.Type, c.Path)
+		}
+	}
+}
+
+func TestDetectFrontmatterOnlyFile(t *testing.T) {
+	// Create temporary directory for test vault.
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create test database.
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	// File with only frontmatter, no body.
+	content := []byte(`---
+title: Metadata Only
+type: config
+---
+`)
+
+	// Write file to disk.
+	err = os.WriteFile(filepath.Join(tmpDir, "metadata-only.md"), content, 0644)
+	if err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// Detect changes - should find a creation.
+	detector := NewChangeDetector(db, tmpDir)
+	changes, err := detector.DetectChanges(context.Background())
+	if err != nil {
+		t.Fatalf("detect changes: %v", err)
+	}
+
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change, got %d", len(changes))
+	}
+
+	change := changes[0]
+	if change.Type != ChangeCreated {
+		t.Errorf("expected ChangeCreated, got %v", change.Type)
+	}
+
+	// Verify LocalHashes are properly set.
+	if change.LocalHashes.FrontmatterHash == "" {
+		t.Error("expected non-empty FrontmatterHash for frontmatter-only file")
+	}
+	if change.LocalHashes.ContentHash != "" {
+		t.Error("expected empty ContentHash for frontmatter-only file (no body)")
+	}
+}
+
+func TestDetectEmptyFile(t *testing.T) {
+	// Create temporary directory for test vault.
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create test database.
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	// Empty file.
+	err = os.WriteFile(filepath.Join(tmpDir, "empty.md"), []byte{}, 0644)
+	if err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// Detect changes - should find a creation even for empty file.
+	detector := NewChangeDetector(db, tmpDir)
+	changes, err := detector.DetectChanges(context.Background())
+	if err != nil {
+		t.Fatalf("detect changes: %v", err)
+	}
+
+	if len(changes) != 1 {
+		t.Fatalf("expected 1 change for empty file, got %d", len(changes))
+	}
+
+	change := changes[0]
+	if change.Type != ChangeCreated {
+		t.Errorf("expected ChangeCreated, got %v", change.Type)
+	}
+
+	// Verify all hashes are empty for empty file.
+	if change.LocalHashes.ContentHash != "" {
+		t.Error("expected empty ContentHash for empty file")
+	}
+	if change.LocalHashes.FrontmatterHash != "" {
+		t.Error("expected empty FrontmatterHash for empty file")
+	}
+	if change.LocalHashes.FullHash != "" {
+		t.Error("expected empty FullHash for empty file")
+	}
+}
+
+func TestDetectWhitespaceNormalizationNoChange(t *testing.T) {
+	// Create temporary directory for test vault.
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create test database.
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	// Original content (normalized).
+	originalContent := []byte("# Title\n\nParagraph one.\n\nParagraph two.")
+
+	// "Modified" content with trailing whitespace and extra blank lines.
+	// Should normalize to the same hash.
+	modifiedContent := []byte("# Title  \n\n\n\nParagraph one.   \n\nParagraph two.  ")
+
+	// Compute hashes for the original content.
+	originalHashes := HashContent(originalContent)
+
+	// Write the "modified" file to disk.
+	err = os.WriteFile(filepath.Join(tmpDir, "whitespace-test.md"), modifiedContent, 0644)
+	if err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	// Set up sync state with original hashes.
+	err = db.SetState(&SyncState{
+		ObsidianPath:    "whitespace-test.md",
+		NotionPageID:    "page-ws-test",
+		ContentHash:     originalHashes.ContentHash,
+		FrontmatterHash: originalHashes.FrontmatterHash,
+		Status:          "synced",
+	})
+	if err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+
+	// Detect changes.
+	detector := NewChangeDetector(db, tmpDir)
+	changes, err := detector.DetectChanges(context.Background())
+	if err != nil {
+		t.Fatalf("detect changes: %v", err)
+	}
+
+	// Should have no changes - whitespace normalization makes them equivalent.
+	if len(changes) != 0 {
+		t.Errorf("expected 0 changes after whitespace normalization, got %d", len(changes))
+	}
+}
