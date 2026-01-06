@@ -57,13 +57,18 @@ func (c *Client) CreatePageUnderPage(ctx context.Context, parentPageID string, p
 		return nil, fmt.Errorf("rate limit: %w", err)
 	}
 
+	// For pages under a parent page (not a database), Notion requires
+	// the title property to be named "title", not "Name" or other custom names.
+	// We need to remap any title property to use the correct key.
+	props := remapTitlePropertyForPage(page.Properties)
+
 	// Create page with properties.
 	created, err := c.api.Page.Create(ctx, &notionapi.PageCreateRequest{
 		Parent: notionapi.Parent{
 			Type:   notionapi.ParentTypePageID,
 			PageID: notionapi.PageID(parentPageID),
 		},
-		Properties: page.Properties,
+		Properties: props,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create page: %w", err)
@@ -259,6 +264,35 @@ func (c *Client) deleteAllBlocks(ctx context.Context, pageID string) error {
 // Uses the extractBlockID function from blocks.go.
 func getBlockID(block notionapi.Block) string {
 	return extractBlockID(block)
+}
+
+// remapTitlePropertyForPage converts properties for use with page parents.
+// Notion requires the title property to be named "title" (lowercase) when
+// creating pages under another page. Database pages can use custom names like "Name".
+func remapTitlePropertyForPage(props notionapi.Properties) notionapi.Properties {
+	if props == nil {
+		return notionapi.Properties{}
+	}
+
+	result := make(notionapi.Properties)
+
+	// Find and remap title property, copy others as-is.
+	for _, value := range props {
+		// Check if this is a title property by type.
+		switch v := value.(type) {
+		case notionapi.TitleProperty:
+			// Always use "title" for page parents.
+			result["title"] = v
+		case *notionapi.TitleProperty:
+			result["title"] = *v
+		default:
+			// For page parents, only title property is valid.
+			// Skip other properties as they require a database schema.
+			// This prevents "Invalid property identifier" errors.
+		}
+	}
+
+	return result
 }
 
 // PageMetadata contains lightweight page information for change detection.
