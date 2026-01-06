@@ -25,7 +25,7 @@ func TestDetectRenames(t *testing.T) {
 
 	// Create a file with known content.
 	content := []byte("# Test Note\n\nThis is a test note.")
-	contentHash := hashContent(content)
+	contentHash := HashContent(content).FullHash
 
 	// Set up sync state for "old-name.md" with known content hash.
 	err = db.SetState(&SyncState{

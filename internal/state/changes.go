@@ -2,8 +2,6 @@ package state
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -43,6 +41,11 @@ type Change struct {
 	LocalMtime  time.Time
 	RemoteMtime time.Time
 	State       *SyncState // Associated sync state (for renames/deletions)
+
+	// FrontmatterOnly indicates only metadata changed (not body content).
+	// This enables property-only updates in Notion without re-syncing content.
+	FrontmatterOnly bool
+	LocalHashes     ContentHashes // Full hash breakdown for local content
 }
 
 // ChangeDetector detects changes between the local vault and sync state.
@@ -101,10 +104,11 @@ func (d *ChangeDetector) DetectChanges(ctx context.Context) ([]Change, error) {
 			if err != nil {
 				continue // Skip files we can't read.
 			}
-			localHash := hashContent(content)
+			localHashes := HashContent(content)
 			newFiles[path] = fileWithHash{
-				info: info,
-				hash: localHash,
+				info:   info,
+				hash:   localHashes.FullHash,
+				hashes: localHashes,
 			}
 			continue
 		}
@@ -115,17 +119,25 @@ func (d *ChangeDetector) DetectChanges(ctx context.Context) ([]Change, error) {
 			continue // Skip files we can't read.
 		}
 
-		localHash := hashContent(content)
+		localHashes := HashContent(content)
+		stateHashes := HashesFromState(state)
 
-		if localHash != state.ContentHash {
+		// Check if content has changed using normalized comparison.
+		if HasContentChanged(stateHashes, localHashes) {
+			// Determine if it's a frontmatter-only change.
+			frontmatterOnly := HasFrontmatterChanged(stateHashes, localHashes) &&
+				!HasBodyChanged(stateHashes, localHashes)
+
 			// Local modification detected.
 			change := Change{
-				Path:       path,
-				Type:       ChangeModified,
-				Direction:  DirectionPush,
-				LocalHash:  localHash,
-				LocalMtime: info.ModTime(),
-				State:      state,
+				Path:            path,
+				Type:            ChangeModified,
+				Direction:       DirectionPush,
+				LocalHash:       localHashes.FullHash,
+				LocalMtime:      info.ModTime(),
+				State:           state,
+				FrontmatterOnly: frontmatterOnly,
+				LocalHashes:     localHashes,
 			}
 
 			// Check if remote was also modified (conflict).
@@ -179,11 +191,12 @@ func (d *ChangeDetector) DetectChanges(ctx context.Context) ([]Change, error) {
 	for path, fh := range newFiles {
 		if !renamedPaths[path] {
 			changes = append(changes, Change{
-				Path:       path,
-				Type:       ChangeCreated,
-				Direction:  DirectionPush,
-				LocalHash:  fh.hash,
-				LocalMtime: fh.info.ModTime(),
+				Path:        path,
+				Type:        ChangeCreated,
+				Direction:   DirectionPush,
+				LocalHash:   fh.hash,
+				LocalMtime:  fh.info.ModTime(),
+				LocalHashes: fh.hashes,
 			})
 		}
 	}
@@ -204,8 +217,9 @@ func (d *ChangeDetector) DetectChanges(ctx context.Context) ([]Change, error) {
 
 // fileWithHash holds file info and its content hash.
 type fileWithHash struct {
-	info fs.FileInfo
-	hash string
+	info   fs.FileInfo
+	hash   string        // FullHash for rename detection
+	hashes ContentHashes // Complete hash breakdown
 }
 
 // DetectRemoteChanges checks Notion for pages modified since last sync.
@@ -253,17 +267,19 @@ func (d *ChangeDetector) DetectRemoteChanges(ctx context.Context, getRemoteInfo 
 				continue
 			}
 
-			localHash := hashContent(localContent)
+			localHashes := HashContent(localContent)
+			stateHashes := HashesFromState(state)
 
-			if localHash != state.ContentHash {
+			if HasContentChanged(stateHashes, localHashes) {
 				// Both modified - conflict!
 				changes = append(changes, Change{
 					Path:        state.ObsidianPath,
 					Type:        ChangeConflict,
 					Direction:   DirectionBoth,
-					LocalHash:   localHash,
+					LocalHash:   localHashes.FullHash,
 					RemoteHash:  remoteHash,
 					RemoteMtime: remoteMtime,
+					LocalHashes: localHashes,
 				})
 			} else {
 				// Only remote modified.
@@ -316,17 +332,22 @@ func (d *ChangeDetector) scanVault() (map[string]fs.FileInfo, error) {
 	return files, err
 }
 
-// HashContent computes a SHA-256 hash of content.
-func hashContent(content []byte) string {
-	hash := sha256.Sum256(content)
-	return hex.EncodeToString(hash[:])
-}
-
-// HashFile computes a SHA-256 hash of a file.
+// HashFile computes a normalized SHA-256 hash of a file.
+// Returns the FullHash which considers both frontmatter and body content.
 func HashFile(path string) (string, error) {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	return hashContent(content), nil
+	return HashContent(content).FullHash, nil
+}
+
+// HashFileDetailed computes all hashes for a file.
+// Returns ContentHashes with separate frontmatter and body hashes.
+func HashFileDetailed(path string) (ContentHashes, error) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return ContentHashes{}, err
+	}
+	return HashContent(content), nil
 }
