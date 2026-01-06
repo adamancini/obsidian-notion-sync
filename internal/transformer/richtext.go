@@ -55,6 +55,10 @@ func (t *Transformer) transformInline(n ast.Node, source []byte, inherited *noti
 
 	case *ast.CodeSpan:
 		content := string(node.Text(source))
+		// Check for inline dataview query: `=expression`
+		if strings.HasPrefix(content, "=") {
+			return t.transformInlineDataview(content[1:], inherited)
+		}
 		newAnnotations := copyAnnotations(inherited)
 		newAnnotations.Code = true
 		return []notionapi.RichText{
@@ -135,9 +139,20 @@ func (t *Transformer) transformInline(n ast.Node, source []byte, inherited *noti
 		}
 
 	case *wikilink.Node:
-		// Wiki-link: [[target]] or [[target|alias]]
 		target := string(node.Target)
 		alias := extractWikilinkAliasFromNode(node, source)
+
+		// Check if this is an embed (![[...]]).
+		if node.Embed {
+			// Check if it's an image embed.
+			if isImageFile(target) {
+				return t.transformWikiLinkImage(target, alias, inherited)
+			}
+			// Other embeds (notes, PDFs, etc.) - for now, render as text placeholder.
+			return t.transformWikiLinkEmbed(target, alias, inherited)
+		}
+
+		// Regular wiki-link: [[target]] or [[target|alias]]
 		return t.transformWikiLink(target, alias, inherited)
 
 	case *extast.Strikethrough:
@@ -289,55 +304,6 @@ func (t *Transformer) parseTextWithHighlights(content string, annotations *notio
 	return result
 }
 
-// transformTextWithInlineMath parses text for inline math ($...$) patterns.
-func (t *Transformer) transformTextWithInlineMath(content string, annotations *notionapi.Annotations) []notionapi.RichText {
-	var result []notionapi.RichText
-
-	// Inline math pattern: $...$ (but not $$)
-	mathRegex := regexp.MustCompile(`(?:^|[^$])\$([^$\n]+)\$(?:[^$]|$)`)
-
-	matches := mathRegex.FindAllStringSubmatchIndex(content, -1)
-	if len(matches) == 0 {
-		// No inline math, check for highlights.
-		return t.parseTextWithHighlights(content, annotations)
-	}
-
-	lastEnd := 0
-	for _, match := range matches {
-		// Get the capture group for the math content.
-		captureStart, captureEnd := match[2], match[3]
-		// Adjust for the $ delimiters.
-		fullStart := captureStart - 1
-		fullEnd := captureEnd + 1
-
-		// Add text before the math.
-		if fullStart > lastEnd {
-			before := content[lastEnd:fullStart]
-			result = append(result, t.parseTextWithHighlights(before, annotations)...)
-		}
-
-		// Add math expression as equation.
-		mathExpr := content[captureStart:captureEnd]
-		result = append(result, notionapi.RichText{
-			Type: "equation",
-			Equation: &notionapi.Equation{
-				Expression: strings.TrimSpace(mathExpr),
-			},
-			Annotations: copyAnnotations(annotations),
-		})
-
-		lastEnd = fullEnd
-	}
-
-	// Add text after the last math expression.
-	if lastEnd < len(content) {
-		after := content[lastEnd:]
-		result = append(result, t.parseTextWithHighlights(after, annotations)...)
-	}
-
-	return result
-}
-
 // transformWikiLink converts an Obsidian wiki-link to a Notion mention or text.
 func (t *Transformer) transformWikiLink(target, alias string, annotations *notionapi.Annotations) []notionapi.RichText {
 	// Try to resolve the link.
@@ -353,7 +319,7 @@ func (t *Transformer) transformWikiLink(target, alias string, annotations *notio
 							ID: notionapi.ObjectID(pageID),
 						},
 					},
-					Annotations: annotations,
+					Annotations: copyAnnotations(annotations),
 					PlainText:   displayText(target, alias),
 				},
 			}
@@ -372,35 +338,21 @@ func (t *Transformer) transformWikiLink(target, alias string, annotations *notio
 			{
 				Type:        notionapi.ObjectTypeText,
 				Text:        &notionapi.Text{Content: display},
-				Annotations: annotations,
+				Annotations: copyAnnotations(annotations),
 			},
 		}
 
 	default: // "placeholder"
-		// Red text to indicate unresolved link.
+		// Red text to indicate unresolved link, but preserve other formatting.
+		placeholderAnnotations := copyAnnotations(annotations)
+		placeholderAnnotations.Color = notionapi.ColorRed
 		return []notionapi.RichText{
 			{
-				Type: notionapi.ObjectTypeText,
-				Text: &notionapi.Text{Content: "[[" + display + "]]"},
-				Annotations: &notionapi.Annotations{
-					Color: notionapi.ColorRed,
-				},
+				Type:        notionapi.ObjectTypeText,
+				Text:        &notionapi.Text{Content: "[[" + display + "]]"},
+				Annotations: placeholderAnnotations,
 			},
 		}
-	}
-}
-
-// transformHighlight converts Obsidian ==highlight== to yellow background.
-func (t *Transformer) transformHighlight(content string, annotations *notionapi.Annotations) []notionapi.RichText {
-	newAnnotations := copyAnnotations(annotations)
-	newAnnotations.Color = notionapi.ColorYellowBackground
-
-	return []notionapi.RichText{
-		{
-			Type:        notionapi.ObjectTypeText,
-			Text:        &notionapi.Text{Content: content},
-			Annotations: newAnnotations,
-		},
 	}
 }
 
@@ -437,4 +389,92 @@ func displayText(target, alias string) string {
 		return alias
 	}
 	return target
+}
+
+// transformInlineDataview converts an inline dataview query to a placeholder.
+// Inline dataview queries like `=this.file.name` cannot be executed in Notion,
+// so we create a styled placeholder that preserves the original query.
+func (t *Transformer) transformInlineDataview(query string, annotations *notionapi.Annotations) []notionapi.RichText {
+	// Create a placeholder that shows the query was a dataview expression.
+	// Use purple background to distinguish from regular code.
+	return []notionapi.RichText{
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: "[dv: " + query + "]"},
+			Annotations: &notionapi.Annotations{
+				Code:  true,
+				Color: notionapi.ColorPurpleBackground,
+			},
+		},
+	}
+}
+
+// isImageFile checks if a filename has an image extension.
+func isImageFile(filename string) bool {
+	lower := strings.ToLower(filename)
+	imageExts := []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".ico"}
+	for _, ext := range imageExts {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// transformWikiLinkImage converts a wiki-link image embed to rich text.
+// Since we can't create block-level images in inline context, we create a placeholder.
+func (t *Transformer) transformWikiLinkImage(target, alias string, annotations *notionapi.Annotations) []notionapi.RichText {
+	displayText := target
+	if alias != "" {
+		// Alias might contain dimensions like "300x200", ignore for display.
+		if !strings.Contains(alias, "x") && !strings.ContainsAny(alias, "0123456789") {
+			displayText = alias
+		}
+	}
+
+	// Create an inline image placeholder.
+	return []notionapi.RichText{
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: "[🖼️ " + displayText + "]"},
+			Annotations: &notionapi.Annotations{
+				Color: notionapi.ColorGrayBackground,
+			},
+		},
+	}
+}
+
+// transformWikiLinkEmbed converts a wiki-link embed (non-image) to rich text.
+// This handles ![[note]] or ![[file.pdf]] embeds.
+func (t *Transformer) transformWikiLinkEmbed(target, alias string, annotations *notionapi.Annotations) []notionapi.RichText {
+	displayText := target
+	if alias != "" {
+		displayText = alias
+	}
+
+	// Determine embed type for icon.
+	var icon string
+	lower := strings.ToLower(target)
+	switch {
+	case strings.HasSuffix(lower, ".pdf"):
+		icon = "📄"
+	case strings.HasSuffix(lower, ".mp3"), strings.HasSuffix(lower, ".wav"), strings.HasSuffix(lower, ".m4a"):
+		icon = "🎵"
+	case strings.HasSuffix(lower, ".mp4"), strings.HasSuffix(lower, ".webm"), strings.HasSuffix(lower, ".mov"):
+		icon = "🎬"
+	case strings.HasSuffix(lower, ".excalidraw.md"):
+		icon = "✏️"
+	default:
+		icon = "📎" // Generic embed/note reference.
+	}
+
+	return []notionapi.RichText{
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: "[" + icon + " " + displayText + "]"},
+			Annotations: &notionapi.Annotations{
+				Color: notionapi.ColorBlueBackground,
+			},
+		},
+	}
 }
