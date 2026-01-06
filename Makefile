@@ -92,6 +92,31 @@ bench: ## Run benchmarks
 	@echo "Running benchmarks..."
 	$(GOTEST) -bench=. -benchmem ./...
 
+## E2E Testing targets
+
+.PHONY: test-e2e
+test-e2e: ## Run E2E integration tests (requires NOTION_TOKEN and NOTION_TEST_PAGE_ID)
+	@echo "Running E2E integration tests..."
+	@if [ -z "$$NOTION_TOKEN" ]; then \
+		echo "Error: NOTION_TOKEN environment variable not set"; \
+		echo "Usage: NOTION_TOKEN=xxx NOTION_TEST_PAGE_ID=yyy make test-e2e"; \
+		exit 1; \
+	fi
+	@if [ -z "$$NOTION_TEST_PAGE_ID" ]; then \
+		echo "Error: NOTION_TEST_PAGE_ID environment variable not set"; \
+		echo "Usage: NOTION_TOKEN=xxx NOTION_TEST_PAGE_ID=yyy make test-e2e"; \
+		exit 1; \
+	fi
+	$(GOTEST) -v -tags=e2e -timeout=10m ./tests/e2e/...
+
+.PHONY: test-e2e-verbose
+test-e2e-verbose: ## Run E2E tests with verbose output
+	@echo "Running E2E integration tests (verbose)..."
+	$(GOTEST) -v -tags=e2e -timeout=10m -count=1 ./tests/e2e/...
+
+.PHONY: test-all
+test-all: test test-e2e ## Run all tests (unit + E2E)
+
 ## Code quality targets
 
 .PHONY: lint
