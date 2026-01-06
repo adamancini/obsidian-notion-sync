@@ -598,6 +598,48 @@ func TestTransformRichText_Highlight(t *testing.T) {
 	}
 }
 
+func TestTransformRichText_Underline(t *testing.T) {
+	rt := NewReverse(nil, nil)
+
+	richText := []notionapi.RichText{
+		{
+			PlainText: "underlined text",
+			Annotations: &notionapi.Annotations{
+				Underline: true,
+			},
+		},
+	}
+
+	result := rt.TransformRichText(richText)
+	expected := "<u>underlined text</u>"
+
+	if result != expected {
+		t.Errorf("TransformRichText() = %q, want %q", result, expected)
+	}
+}
+
+func TestTransformRichText_UnderlineWithOtherFormats(t *testing.T) {
+	rt := NewReverse(nil, nil)
+
+	richText := []notionapi.RichText{
+		{
+			PlainText: "formatted",
+			Annotations: &notionapi.Annotations{
+				Bold:      true,
+				Underline: true,
+			},
+		},
+	}
+
+	result := rt.TransformRichText(richText)
+	// Underline is applied before italic/bold in order, so expect: **<u>text</u>**
+	expected := "**<u>formatted</u>**"
+
+	if result != expected {
+		t.Errorf("TransformRichText() = %q, want %q", result, expected)
+	}
+}
+
 func TestTransformRichText_Link(t *testing.T) {
 	rt := NewReverse(nil, nil)
 
@@ -1102,5 +1144,60 @@ func TestRichTextToPlainText(t *testing.T) {
 
 	if result != expected {
 		t.Errorf("richTextToPlainText() = %q, want %q", result, expected)
+	}
+}
+
+// mockUnknownBlock is a test double for an unknown/unsupported block type.
+type mockUnknownBlock struct {
+	notionapi.BasicBlock
+}
+
+func TestTransform_UnknownBlockType(t *testing.T) {
+	rt := NewReverse(nil, nil)
+
+	// Use a mock block that doesn't match any known type.
+	block := &mockUnknownBlock{}
+
+	result, err := rt.Transform([]notionapi.Block{block})
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Should return an HTML comment indicating the unsupported block type.
+	if !strings.Contains(result, "<!-- Unsupported Notion block type:") {
+		t.Errorf("Expected unsupported block comment, got %q", result)
+	}
+	if !strings.Contains(result, "mockUnknownBlock") {
+		t.Errorf("Expected block type name in comment, got %q", result)
+	}
+}
+
+func TestTransform_UnknownBlockTypeWithIndent(t *testing.T) {
+	rt := NewReverse(nil, nil)
+
+	// Test unknown block as a child (with indentation).
+	// Create a paragraph with an unknown child.
+	block := &notionapi.ParagraphBlock{
+		Paragraph: notionapi.Paragraph{
+			RichText: []notionapi.RichText{
+				{PlainText: "Parent paragraph"},
+			},
+			Children: []notionapi.Block{
+				&mockUnknownBlock{},
+			},
+		},
+	}
+
+	result, err := rt.Transform([]notionapi.Block{block})
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Should contain the parent text and an indented unsupported block comment.
+	if !strings.Contains(result, "Parent paragraph") {
+		t.Errorf("Expected parent content, got %q", result)
+	}
+	if !strings.Contains(result, "<!-- Unsupported Notion block type:") {
+		t.Errorf("Expected unsupported block comment, got %q", result)
 	}
 }

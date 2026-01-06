@@ -271,8 +271,8 @@ func (t *ReverseTransformer) blockToMarkdown(block notionapi.Block, depth int) s
 		return fmt.Sprintf("%s[PDF](%s)\n\n", indent, url)
 
 	default:
-		// Unknown block type, skip.
-		return ""
+		// Unknown block type, return HTML comment for transparency.
+		return fmt.Sprintf("%s<!-- Unsupported Notion block type: %T -->\n\n", indent, block)
 	}
 }
 
@@ -396,6 +396,9 @@ func (t *ReverseTransformer) richTextToMarkdown(richText []notionapi.RichText) s
 			}
 			if rt.Annotations.Strikethrough {
 				text = "~~" + text + "~~"
+			}
+			if rt.Annotations.Underline {
+				text = "<u>" + text + "</u>"
 			}
 			if rt.Annotations.Italic {
 				text = "*" + text + "*"
