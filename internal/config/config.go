@@ -113,6 +113,10 @@ type RateLimitConfig struct {
 
 	// BatchSize is the max blocks per API request.
 	BatchSize int `yaml:"batch_size"`
+
+	// Workers is the number of parallel workers for processing.
+	// Default is 4. Set to 1 for sequential processing.
+	Workers int `yaml:"workers"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -146,6 +150,7 @@ func DefaultConfig() *Config {
 		RateLimit: RateLimitConfig{
 			RequestsPerSecond: DefaultRequestsPerSecond,
 			BatchSize:         DefaultBatchSize,
+			Workers:           4,
 		},
 	}
 }

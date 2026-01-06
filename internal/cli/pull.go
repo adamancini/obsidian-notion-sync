@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jomei/notionapi"
@@ -14,6 +15,7 @@ import (
 	"github.com/adamancini/obsidian-notion-sync/internal/config"
 	"github.com/adamancini/obsidian-notion-sync/internal/notion"
 	"github.com/adamancini/obsidian-notion-sync/internal/state"
+	osync "github.com/adamancini/obsidian-notion-sync/internal/sync"
 	"github.com/adamancini/obsidian-notion-sync/internal/transformer"
 )
 
@@ -111,98 +113,78 @@ func runPull(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// 5. Initialize reverse transformer.
-	xform := transformer.NewReverse(linkRegistry, &transformer.Config{
-		UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-		CalloutIcons:        cfg.Transform.Callouts,
-		DataviewHandling:    cfg.Transform.Dataview,
-		FlattenHeadings:     true,
-	})
-
-	// 6. Process each page.
-	var created, updated, deleted, failed int
-
+	// 5. Separate pages by change type for processing.
+	var deletions, fetchModify []pullPage
 	for _, p := range pagesToPull {
 		switch p.changeType {
 		case pullChangeDeleted:
-			// Handle deletion based on strategy.
-			if err := handlePullDeletion(cfg, db, linkRegistry, p); err != nil {
-				fmt.Fprintf(os.Stderr, "  Error deleting %s: %v\n", p.localPath, err)
-				failed++
-				continue
-			}
-			deleted++
-			if verbose {
-				fmt.Printf("  D %s (%s)\n", p.localPath, cfg.Sync.DeletionStrategy)
-			}
-
+			deletions = append(deletions, p)
 		case pullChangeNew, pullChangeModified:
-			// Fetch full page content from Notion.
-			notionPage, err := client.FetchPage(ctx, p.notionPageID)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error fetching %s: %v\n", p.localPath, err)
-				failed++
-				continue
-			}
+			fetchModify = append(fetchModify, p)
+		}
+	}
 
-			// Transform to markdown.
-			markdown, err := xform.NotionToMarkdown(notionPage)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error transforming %s: %v\n", p.localPath, err)
-				failed++
-				continue
-			}
+	// 6. Process deletions sequentially (state-dependent).
+	var deleted int
+	var failed int32
+	for _, p := range deletions {
+		if err := handlePullDeletion(cfg, db, linkRegistry, p); err != nil {
+			fmt.Fprintf(os.Stderr, "  Error deleting %s: %v\n", p.localPath, err)
+			atomic.AddInt32(&failed, 1)
+			continue
+		}
+		deleted++
+		if verbose {
+			fmt.Printf("  D %s (%s)\n", p.localPath, cfg.Sync.DeletionStrategy)
+		}
+	}
 
-			// Ensure directory exists.
-			fullPath := filepath.Join(cfg.Vault, p.localPath)
-			if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-				fmt.Fprintf(os.Stderr, "  Error creating directory for %s: %v\n", p.localPath, err)
-				failed++
-				continue
-			}
+	// 7. Process new/modified pages in parallel.
+	var created, updated int32
+	if len(fetchModify) > 0 {
+		// Initialize worker pool.
+		workers := cfg.RateLimit.Workers
+		if workers < 1 {
+			workers = 4
+		}
+		pool := osync.NewWorkerPool(workers)
 
-			// Write file.
-			if err := os.WriteFile(fullPath, markdown, 0644); err != nil {
-				fmt.Fprintf(os.Stderr, "  Error writing %s: %v\n", p.localPath, err)
-				failed++
-				continue
-			}
+		// Initialize progress reporter.
+		progress := osync.NewProgress(len(fetchModify), os.Stdout)
+		progress.SetEnabled(!verbose) // Use progress bar only when not verbose
 
-			// Update sync state.
-			contentHash, _ := state.HashFile(fullPath)
-			fileInfo, _ := os.Stat(fullPath)
-			var mtime time.Time
-			if fileInfo != nil {
-				mtime = fileInfo.ModTime()
-			}
+		// Create processing context.
+		procCtx := &pullContext{
+			cfg:          cfg,
+			db:           db,
+			client:       client,
+			linkRegistry: linkRegistry,
+			transformer: transformer.NewReverse(linkRegistry, &transformer.Config{
+				UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
+				CalloutIcons:        cfg.Transform.Callouts,
+				DataviewHandling:    cfg.Transform.Dataview,
+				FlattenHeadings:     true,
+			}),
+		}
 
-			syncState := p.state
-			if syncState == nil {
-				syncState = &state.SyncState{
-					ObsidianPath: p.localPath,
-					NotionPageID: p.notionPageID,
-				}
-			}
-			syncState.ContentHash = contentHash
-			syncState.ObsidianMtime = mtime
-			syncState.NotionMtime = p.notionMtime
-			syncState.LastSync = time.Now()
-			syncState.Status = "synced"
-			syncState.SyncDirection = "pull"
+		// Process pages in parallel.
+		results := osync.ProcessWithProgress(ctx, pool, fetchModify, procCtx.processPage, progress.SimpleCallback())
+		progress.Finish()
 
-			if err := db.SetState(syncState); err != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: failed to update state for %s: %v\n", p.localPath, err)
-			}
-
-			if p.changeType == pullChangeNew {
-				created++
+		// Collect results.
+		for _, result := range results {
+			if result.Err != nil {
+				fmt.Fprintf(os.Stderr, "  Error processing %s: %v\n", result.Input.localPath, result.Err)
+				atomic.AddInt32(&failed, 1)
+			} else if result.Result.isNew {
+				atomic.AddInt32(&created, 1)
 				if verbose {
-					fmt.Printf("  + %s\n", p.localPath)
+					fmt.Printf("  + %s\n", result.Input.localPath)
 				}
 			} else {
-				updated++
+				atomic.AddInt32(&updated, 1)
 				if verbose {
-					fmt.Printf("  M %s\n", p.localPath)
+					fmt.Printf("  M %s\n", result.Input.localPath)
 				}
 			}
 		}
@@ -446,4 +428,72 @@ func isNotFoundError(err error) bool {
 	return strings.Contains(errStr, "not found") ||
 		strings.Contains(errStr, "Could not find") ||
 		strings.Contains(errStr, "404")
+}
+
+// pullContext holds shared dependencies for parallel page processing.
+type pullContext struct {
+	cfg          *config.Config
+	db           *state.DB
+	client       *notion.Client
+	linkRegistry *state.LinkRegistry
+	transformer  *transformer.ReverseTransformer
+}
+
+// pullResult holds the result of processing a single page.
+type pullResult struct {
+	isNew bool
+}
+
+// processPage processes a single page for pull (fetch, transform, write).
+func (pc *pullContext) processPage(ctx context.Context, p pullPage) (pullResult, error) {
+	// Fetch full page content from Notion.
+	notionPage, err := pc.client.FetchPage(ctx, p.notionPageID)
+	if err != nil {
+		return pullResult{}, fmt.Errorf("fetch page: %w", err)
+	}
+
+	// Transform to markdown.
+	markdown, err := pc.transformer.NotionToMarkdown(notionPage)
+	if err != nil {
+		return pullResult{}, fmt.Errorf("transform to markdown: %w", err)
+	}
+
+	// Ensure directory exists.
+	fullPath := filepath.Join(pc.cfg.Vault, p.localPath)
+	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
+		return pullResult{}, fmt.Errorf("create directory: %w", err)
+	}
+
+	// Write file.
+	if err := os.WriteFile(fullPath, markdown, 0644); err != nil {
+		return pullResult{}, fmt.Errorf("write file: %w", err)
+	}
+
+	// Update sync state.
+	contentHash, _ := state.HashFile(fullPath)
+	fileInfo, _ := os.Stat(fullPath)
+	var mtime time.Time
+	if fileInfo != nil {
+		mtime = fileInfo.ModTime()
+	}
+
+	syncState := p.state
+	if syncState == nil {
+		syncState = &state.SyncState{
+			ObsidianPath: p.localPath,
+			NotionPageID: p.notionPageID,
+		}
+	}
+	syncState.ContentHash = contentHash
+	syncState.ObsidianMtime = mtime
+	syncState.NotionMtime = p.notionMtime
+	syncState.LastSync = time.Now()
+	syncState.Status = "synced"
+	syncState.SyncDirection = "pull"
+
+	if err := pc.db.SetState(syncState); err != nil {
+		return pullResult{}, fmt.Errorf("update state: %w", err)
+	}
+
+	return pullResult{isNew: p.changeType == pullChangeNew}, nil
 }

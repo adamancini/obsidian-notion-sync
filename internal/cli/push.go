@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -14,6 +15,7 @@ import (
 	"github.com/adamancini/obsidian-notion-sync/internal/notion"
 	"github.com/adamancini/obsidian-notion-sync/internal/parser"
 	"github.com/adamancini/obsidian-notion-sync/internal/state"
+	osync "github.com/adamancini/obsidian-notion-sync/internal/sync"
 	"github.com/adamancini/obsidian-notion-sync/internal/transformer"
 	"github.com/adamancini/obsidian-notion-sync/internal/vault"
 )
@@ -114,149 +116,95 @@ func runPush(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// 5. Initialize parser and transformer.
-	p := parser.New()
-	xform := transformer.New(linkRegistry, &transformer.Config{
-		UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-		CalloutIcons:        cfg.Transform.Callouts,
-		DataviewHandling:    cfg.Transform.Dataview,
-		FlattenHeadings:     true,
-	})
-
-	// 6. Process changes by type.
-	var created, updated, renamed, deleted, failed int
-	scanner := vault.NewScanner(cfg.Vault, cfg.Sync.Ignore)
-
+	// 5. Separate files by change type for processing.
+	var deletions, renames, createModify []pushFile
 	for _, f := range filesToPush {
 		switch f.changeType {
 		case state.ChangeDeleted:
-			// Handle deletion based on strategy.
-			if err := handleDeletion(ctx, cfg, db, client, linkRegistry, f); err != nil {
-				fmt.Fprintf(os.Stderr, "  Error deleting %s: %v\n", f.path, err)
-				failed++
-				continue
-			}
-			deleted++
-			if verbose {
-				fmt.Printf("  D %s (%s)\n", f.path, cfg.Sync.DeletionStrategy)
-			}
-
+			deletions = append(deletions, f)
 		case state.ChangeRenamed:
-			// Handle rename.
-			if err := handleRename(ctx, cfg, db, client, linkRegistry, f); err != nil {
-				fmt.Fprintf(os.Stderr, "  Error renaming %s: %v\n", f.oldPath, err)
-				failed++
-				continue
-			}
-			renamed++
-			if verbose {
-				fmt.Printf("  R %s -> %s\n", f.oldPath, f.path)
-			}
-
+			renames = append(renames, f)
 		case state.ChangeCreated, state.ChangeModified:
-			// Handle create or update.
-			content, err := scanner.ReadFile(f.path)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error reading %s: %v\n", f.path, err)
-				failed++
-				continue
-			}
+			createModify = append(createModify, f)
+		}
+	}
 
-			note, err := p.Parse(f.path, content)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error parsing %s: %v\n", f.path, err)
-				failed++
-				continue
-			}
+	// 6. Process deletions and renames sequentially (state-dependent).
+	var renamed, deleted int
+	var failed int32
+	for _, f := range deletions {
+		if err := handleDeletion(ctx, cfg, db, client, linkRegistry, f); err != nil {
+			fmt.Fprintf(os.Stderr, "  Error deleting %s: %v\n", f.path, err)
+			atomic.AddInt32(&failed, 1)
+			continue
+		}
+		deleted++
+		if verbose {
+			fmt.Printf("  D %s (%s)\n", f.path, cfg.Sync.DeletionStrategy)
+		}
+	}
 
-			// Set title from filename if not in frontmatter.
-			if _, ok := note.Frontmatter["title"]; !ok {
-				basename := filepath.Base(f.path)
-				title := strings.TrimSuffix(basename, filepath.Ext(basename))
-				note.Frontmatter["title"] = title
-			}
+	for _, f := range renames {
+		if err := handleRename(ctx, cfg, db, client, linkRegistry, f); err != nil {
+			fmt.Fprintf(os.Stderr, "  Error renaming %s: %v\n", f.oldPath, err)
+			atomic.AddInt32(&failed, 1)
+			continue
+		}
+		renamed++
+		if verbose {
+			fmt.Printf("  R %s -> %s\n", f.oldPath, f.path)
+		}
+	}
 
-			// Transform to Notion page.
-			notionPage, err := xform.Transform(note)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "  Error transforming %s: %v\n", f.path, err)
-				failed++
-				continue
-			}
+	// 7. Process creates/modifies in parallel.
+	var created, updated int32
+	if len(createModify) > 0 {
+		// Initialize worker pool.
+		workers := cfg.RateLimit.Workers
+		if workers < 1 {
+			workers = 4
+		}
+		pool := osync.NewWorkerPool(workers)
 
-			// Get sync state.
-			syncState := f.state
-			if syncState == nil {
-				syncState = &state.SyncState{
-					ObsidianPath: f.path,
-				}
-			}
+		// Initialize progress reporter.
+		progress := osync.NewProgress(len(createModify), os.Stdout)
+		progress.SetEnabled(!verbose) // Use progress bar only when not verbose
 
-			// Create or update in Notion.
-			var pageID string
-			if syncState.NotionPageID == "" {
-				// Create new page.
-				databaseID := cfg.GetDatabaseForPath(f.path)
-				if databaseID == "" && cfg.Notion.DefaultPage != "" {
-					result, err := client.CreatePageUnderPage(ctx, cfg.Notion.DefaultPage, notionPage)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "  Error creating %s: %v\n", f.path, err)
-						failed++
-						continue
-					}
-					pageID = result.PageID
-				} else if databaseID != "" {
-					result, err := client.CreatePage(ctx, databaseID, notionPage)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "  Error creating %s: %v\n", f.path, err)
-						failed++
-						continue
-					}
-					pageID = result.PageID
-				} else {
-					fmt.Fprintf(os.Stderr, "  Error: no database or page configured for %s\n", f.path)
-					failed++
-					continue
-				}
-				created++
+		// Create processing context.
+		procCtx := &pushContext{
+			cfg:          cfg,
+			db:           db,
+			client:       client,
+			linkRegistry: linkRegistry,
+			parser:       parser.New(),
+			transformer: transformer.New(linkRegistry, &transformer.Config{
+				UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
+				CalloutIcons:        cfg.Transform.Callouts,
+				DataviewHandling:    cfg.Transform.Dataview,
+				FlattenHeadings:     true,
+			}),
+			scanner: vault.NewScanner(cfg.Vault, cfg.Sync.Ignore),
+		}
+
+		// Process files in parallel.
+		results := osync.ProcessWithProgress(ctx, pool, createModify, procCtx.processFile, progress.SimpleCallback())
+		progress.Finish()
+
+		// Collect results.
+		for _, result := range results {
+			if result.Err != nil {
+				fmt.Fprintf(os.Stderr, "  Error processing %s: %v\n", result.Input.path, result.Err)
+				atomic.AddInt32(&failed, 1)
+			} else if result.Result.isNew {
+				atomic.AddInt32(&created, 1)
 				if verbose {
-					fmt.Printf("  + %s (page: %s)\n", f.path, pageID)
+					fmt.Printf("  + %s (page: %s)\n", result.Input.path, result.Result.pageID)
 				}
 			} else {
-				// Update existing page.
-				pageID = syncState.NotionPageID
-				if err := client.UpdatePage(ctx, pageID, notionPage); err != nil {
-					fmt.Fprintf(os.Stderr, "  Error updating %s: %v\n", f.path, err)
-					failed++
-					continue
-				}
-				updated++
+				atomic.AddInt32(&updated, 1)
 				if verbose {
-					fmt.Printf("  M %s\n", f.path)
+					fmt.Printf("  M %s\n", result.Input.path)
 				}
-			}
-
-			// Update sync state.
-			contentHash, _ := state.HashFile(filepath.Join(cfg.Vault, f.path))
-			syncState.NotionPageID = pageID
-			syncState.ContentHash = contentHash
-			syncState.ObsidianMtime = f.mtime
-			syncState.LastSync = time.Now()
-			syncState.Status = "synced"
-			syncState.SyncDirection = "push"
-
-			if err := db.SetState(syncState); err != nil {
-				fmt.Fprintf(os.Stderr, "  Warning: failed to update state for %s: %v\n", f.path, err)
-			}
-
-			// Register wiki-links for resolution.
-			if len(note.WikiLinks) > 0 {
-				targets := make([]string, len(note.WikiLinks))
-				for i, link := range note.WikiLinks {
-					targets[i] = link.Target
-				}
-				_ = linkRegistry.ClearLinksFrom(f.path)
-				_ = linkRegistry.RegisterLinks(f.path, targets)
 			}
 		}
 	}
@@ -467,4 +415,91 @@ func checkConflicts(files []pushFile) []string {
 		}
 	}
 	return conflicts
+}
+
+// pushContext holds shared dependencies for parallel file processing.
+type pushContext struct {
+	cfg          *config.Config
+	db           *state.DB
+	client       *notion.Client
+	linkRegistry *state.LinkRegistry
+	parser       *parser.Parser
+	transformer  *transformer.Transformer
+	scanner      *vault.Scanner
+}
+
+// pushResult holds the result of processing a single file.
+type pushResult struct {
+	pageID string
+	isNew  bool
+}
+
+// processFile processes a single file for push (create or update).
+func (pc *pushContext) processFile(ctx context.Context, f pushFile) (pushResult, error) {
+	// Read file content.
+	fullPath := filepath.Join(pc.cfg.Vault, f.path)
+	content, err := os.ReadFile(fullPath)
+	if err != nil {
+		return pushResult{}, fmt.Errorf("read file: %w", err)
+	}
+
+	// Parse the markdown.
+	note, err := pc.parser.Parse(f.path, content)
+	if err != nil {
+		return pushResult{}, fmt.Errorf("parse markdown: %w", err)
+	}
+
+	// Transform to Notion page structure.
+	notionPage, err := pc.transformer.Transform(note)
+	if err != nil {
+		return pushResult{}, fmt.Errorf("transform to Notion: %w", err)
+	}
+
+	var pageID string
+	var isNew bool
+
+	if f.state == nil || f.state.NotionPageID == "" {
+		// Create new page.
+		parentID := pc.cfg.GetDatabaseForPath(f.path)
+		if parentID == "" {
+			parentID = pc.cfg.Notion.DefaultPage
+		}
+
+		result, err := pc.client.CreatePage(ctx, parentID, notionPage)
+		if err != nil {
+			return pushResult{}, fmt.Errorf("create page: %w", err)
+		}
+		pageID = result.PageID
+		isNew = true
+	} else {
+		// Update existing page.
+		pageID = f.state.NotionPageID
+
+		if err := pc.client.UpdatePage(ctx, pageID, notionPage); err != nil {
+			return pushResult{}, fmt.Errorf("update page: %w", err)
+		}
+	}
+
+	// Compute content hash.
+	hash, err := state.HashFile(fullPath)
+	if err != nil {
+		hash = "" // Non-fatal, continue without hash
+	}
+
+	// Update sync state.
+	syncState := &state.SyncState{
+		ObsidianPath:  f.path,
+		NotionPageID:  pageID,
+		ObsidianMtime: f.mtime,
+		NotionMtime:   time.Now(),
+		ContentHash:   hash,
+		LastSync:      time.Now(),
+		SyncDirection: "push",
+		Status:        "synced",
+	}
+	if err := pc.db.SetState(syncState); err != nil {
+		return pushResult{}, fmt.Errorf("update state: %w", err)
+	}
+
+	return pushResult{pageID: pageID, isNew: isNew}, nil
 }
