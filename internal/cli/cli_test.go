@@ -1340,3 +1340,214 @@ func TestRootCommand_UsageDescription(t *testing.T) {
 		t.Error("rootCmd should have a Long description")
 	}
 }
+
+// =============================================================================
+// Two-Pass Wiki-Link Resolution Tests (ANN-65)
+// =============================================================================
+
+func TestCheckForNewlyResolvedLinks(t *testing.T) {
+	// Create temporary directory for test database.
+	tmpDir, err := os.MkdirTemp("", "push-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Create test database.
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	registry := state.NewLinkRegistry(db)
+
+	// Scenario 1: File with no links should return false
+	hasResolved, err := checkForNewlyResolvedLinks(registry, "no-links.md")
+	if err != nil {
+		t.Fatalf("checkForNewlyResolvedLinks error: %v", err)
+	}
+	if hasResolved {
+		t.Error("expected false for file with no registered links")
+	}
+
+	// Scenario 2: File with unresolved links should return false
+	err = registry.RegisterLinks("source.md", []string{"Target A", "Target B"})
+	if err != nil {
+		t.Fatalf("register links: %v", err)
+	}
+	hasResolved, err = checkForNewlyResolvedLinks(registry, "source.md")
+	if err != nil {
+		t.Fatalf("checkForNewlyResolvedLinks error: %v", err)
+	}
+	if hasResolved {
+		t.Error("expected false for file with unresolved links")
+	}
+
+	// Scenario 3: After resolving links, should return true
+	// First, create the target page in sync_state
+	err = db.SetState(&state.SyncState{
+		ObsidianPath: "Target A.md",
+		NotionPageID: "notion-page-123",
+		Status:       "synced",
+	})
+	if err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+
+	// Now ResolveAll should resolve "Target A"
+	resolved, err := registry.ResolveAll()
+	if err != nil {
+		t.Fatalf("resolve all: %v", err)
+	}
+	if resolved != 1 {
+		t.Errorf("expected 1 resolved link, got %d", resolved)
+	}
+
+	// Now checkForNewlyResolvedLinks should return true
+	hasResolved, err = checkForNewlyResolvedLinks(registry, "source.md")
+	if err != nil {
+		t.Fatalf("checkForNewlyResolvedLinks error: %v", err)
+	}
+	if !hasResolved {
+		t.Error("expected true after resolving links")
+	}
+}
+
+func TestCheckForNewlyResolvedLinks_ForwardReference(t *testing.T) {
+	// This test simulates the forward reference scenario:
+	// File A links to File B, but B is processed after A.
+	// After B is created, A's links can be resolved.
+
+	tmpDir, err := os.MkdirTemp("", "forward-ref-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	registry := state.NewLinkRegistry(db)
+
+	// Step 1: Process file A which links to B (B doesn't exist yet)
+	err = registry.RegisterLinks("file-a.md", []string{"File B"})
+	if err != nil {
+		t.Fatalf("register links: %v", err)
+	}
+
+	// Create sync state for A (simulating first pass)
+	err = db.SetState(&state.SyncState{
+		ObsidianPath: "file-a.md",
+		NotionPageID: "notion-page-a",
+		Status:       "synced",
+	})
+	if err != nil {
+		t.Fatalf("set state for A: %v", err)
+	}
+
+	// At this point, A's link to B is unresolved
+	hasResolved, _ := checkForNewlyResolvedLinks(registry, "file-a.md")
+	if hasResolved {
+		t.Error("expected false before B is created")
+	}
+
+	// Step 2: Process file B (create it in sync_state)
+	err = db.SetState(&state.SyncState{
+		ObsidianPath: "File B.md",
+		NotionPageID: "notion-page-b",
+		Status:       "synced",
+	})
+	if err != nil {
+		t.Fatalf("set state for B: %v", err)
+	}
+
+	// Step 3: ResolveAll (simulating second pass resolution)
+	resolved, err := registry.ResolveAll()
+	if err != nil {
+		t.Fatalf("resolve all: %v", err)
+	}
+	if resolved != 1 {
+		t.Errorf("expected 1 resolved link, got %d", resolved)
+	}
+
+	// Now A's link to B should be resolved
+	hasResolved, err = checkForNewlyResolvedLinks(registry, "file-a.md")
+	if err != nil {
+		t.Fatalf("checkForNewlyResolvedLinks error: %v", err)
+	}
+	if !hasResolved {
+		t.Error("expected true after B is created and links resolved")
+	}
+}
+
+func TestCheckForNewlyResolvedLinks_CircularReference(t *testing.T) {
+	// Test circular reference: A -> B -> C -> A
+	// All files are new and link to each other.
+
+	tmpDir, err := os.MkdirTemp("", "circular-ref-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := state.Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	registry := state.NewLinkRegistry(db)
+
+	// Register all links (all unresolved initially)
+	err = registry.RegisterLinks("A.md", []string{"B"})
+	if err != nil {
+		t.Fatalf("register A links: %v", err)
+	}
+	err = registry.RegisterLinks("B.md", []string{"C"})
+	if err != nil {
+		t.Fatalf("register B links: %v", err)
+	}
+	err = registry.RegisterLinks("C.md", []string{"A"})
+	if err != nil {
+		t.Fatalf("register C links: %v", err)
+	}
+
+	// Create all pages in sync_state (simulating first pass completes)
+	for _, name := range []string{"A", "B", "C"} {
+		err = db.SetState(&state.SyncState{
+			ObsidianPath: name + ".md",
+			NotionPageID: "notion-page-" + name,
+			Status:       "synced",
+		})
+		if err != nil {
+			t.Fatalf("set state for %s: %v", name, err)
+		}
+	}
+
+	// Resolve all links
+	resolved, err := registry.ResolveAll()
+	if err != nil {
+		t.Fatalf("resolve all: %v", err)
+	}
+	if resolved != 3 {
+		t.Errorf("expected 3 resolved links in circular ref, got %d", resolved)
+	}
+
+	// All files should now have newly resolved links
+	for _, name := range []string{"A.md", "B.md", "C.md"} {
+		hasResolved, err := checkForNewlyResolvedLinks(registry, name)
+		if err != nil {
+			t.Fatalf("checkForNewlyResolvedLinks(%s) error: %v", name, err)
+		}
+		if !hasResolved {
+			t.Errorf("expected %s to have newly resolved links", name)
+		}
+	}
+}

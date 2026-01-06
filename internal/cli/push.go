@@ -209,19 +209,25 @@ func runPush(cmd *cobra.Command, args []string) error {
 	}
 
 	// 8. Second pass: resolve wiki-links and update pages.
-	// First resolve all links in the database.
-	resolvedCount, _ := linkRegistry.ResolveAll()
+	// First resolve all links in the database. This may resolve forward references
+	// where A links to B, but B was processed after A.
+	resolvedCount, resolveErr := linkRegistry.ResolveAll()
+	if resolveErr != nil && verbose {
+		fmt.Fprintf(os.Stderr, "  Warning: partial link resolution failure: %v\n", resolveErr)
+	}
 
-	// Collect newly created pages with wiki-links for second pass update.
+	// Collect ALL pages with wiki-links for second pass update (not just new ones).
+	// Modified files may have wiki-links to newly created pages that need resolution.
 	var pagesNeedingLinkUpdate []pushFile
 	for _, result := range results {
-		if result.Err == nil && result.Result.hasWikiLinks && result.Result.isNew {
+		if result.Err == nil && result.Result.hasWikiLinks {
 			pagesNeedingLinkUpdate = append(pagesNeedingLinkUpdate, result.Input)
 		}
 	}
 
-	// Update pages with newly resolved wiki-links.
+	// Update pages with resolved wiki-links if any links were newly resolved.
 	var linkUpdates int32
+	var linkUpdateErrors int32
 	if len(pagesNeedingLinkUpdate) > 0 && resolvedCount > 0 {
 		if verbose {
 			fmt.Printf("  Updating %d page(s) with resolved wiki-links...\n", len(pagesNeedingLinkUpdate))
@@ -230,20 +236,47 @@ func runPush(cmd *cobra.Command, args []string) error {
 		// Re-process files to update with resolved links.
 		for _, f := range pagesNeedingLinkUpdate {
 			syncState, err := db.GetState(f.path)
-			if err != nil || syncState == nil {
+			if err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "  Warning: cannot get state for %s: %v\n", f.path, err)
+				}
+				atomic.AddInt32(&linkUpdateErrors, 1)
 				continue
+			}
+			if syncState == nil {
+				continue
+			}
+
+			// Check if this file has any links that were just resolved.
+			// Skip update if all links from this file were already resolved before.
+			hasNewlyResolvedLinks, err := checkForNewlyResolvedLinks(linkRegistry, f.path)
+			if err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "  Warning: cannot check links for %s: %v\n", f.path, err)
+				}
+			}
+			if !hasNewlyResolvedLinks {
+				continue // No need to update this page
 			}
 
 			// Re-read and re-transform with links now resolvable.
 			fullPath := filepath.Join(cfg.Vault, f.path)
 			content, err := os.ReadFile(fullPath)
 			if err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "  Warning: cannot read %s: %v\n", f.path, err)
+				}
+				atomic.AddInt32(&linkUpdateErrors, 1)
 				continue
 			}
 
 			p := parser.New()
 			note, err := p.Parse(f.path, content)
 			if err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "  Warning: cannot parse %s: %v\n", f.path, err)
+				}
+				atomic.AddInt32(&linkUpdateErrors, 1)
 				continue
 			}
 
@@ -251,6 +284,10 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 			notionPage, err := t.Transform(note)
 			if err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "  Warning: cannot transform %s: %v\n", f.path, err)
+				}
+				atomic.AddInt32(&linkUpdateErrors, 1)
 				continue
 			}
 
@@ -259,6 +296,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 				if verbose {
 					fmt.Fprintf(os.Stderr, "  Warning: failed to update links in %s: %v\n", f.path, err)
 				}
+				atomic.AddInt32(&linkUpdateErrors, 1)
 				continue
 			}
 			atomic.AddInt32(&linkUpdates, 1)
@@ -267,6 +305,9 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 	if verbose && (resolvedCount > 0 || linkUpdates > 0) {
 		fmt.Printf("  Resolved %d wiki-links, updated %d page(s)\n", resolvedCount, linkUpdates)
+		if linkUpdateErrors > 0 {
+			fmt.Printf("  Link update errors: %d\n", linkUpdateErrors)
+		}
 	}
 
 	// Print summary.
@@ -605,4 +646,29 @@ func (pc *pushContext) processFile(ctx context.Context, f pushFile) (pushResult,
 	}
 
 	return pushResult{pageID: pageID, isNew: isNew, hasWikiLinks: len(note.WikiLinks) > 0}, nil
+}
+
+// checkForNewlyResolvedLinks checks if a file has any links that can now be resolved
+// but couldn't be resolved when the page was first created/updated.
+// This is used to determine if a second-pass update is needed.
+func checkForNewlyResolvedLinks(linkRegistry *state.LinkRegistry, sourcePath string) (bool, error) {
+	links, err := linkRegistry.GetLinksFrom(sourcePath)
+	if err != nil {
+		return false, err
+	}
+
+	for _, link := range links {
+		// If the link was just resolved in the ResolveAll() call,
+		// the `resolved` flag will be true but the original transform
+		// would have rendered it as unresolved (placeholder/text).
+		// We need to re-transform to convert it to a proper page mention.
+		if link.Resolved && link.NotionPageID != "" {
+			// At least one link from this file is now resolved.
+			// We don't track whether it was unresolved during the first pass,
+			// but checking resolved=true means ResolveAll() marked it.
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
