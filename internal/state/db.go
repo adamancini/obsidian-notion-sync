@@ -106,6 +106,9 @@ func (db *DB) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_links_source ON links(source_path);
 	CREATE INDEX IF NOT EXISTS idx_links_target ON links(target_name);
 	CREATE INDEX IF NOT EXISTS idx_history_path ON sync_history(obsidian_path);
+
+	-- Unique constraint to prevent duplicate links
+	CREATE UNIQUE INDEX IF NOT EXISTS idx_links_unique ON links(source_path, target_name);
 	`
 
 	_, err := db.conn.Exec(schema)
