@@ -98,7 +98,12 @@ func (c *Client) UpdatePage(ctx context.Context, pageID string, page *transforme
 	}
 
 	// 2. Prepare properties - remap if page is under a parent page (not database).
+	// Ensure props is never nil to avoid Notion API validation errors.
+	// A nil Properties serializes to JSON null, which Notion rejects.
 	props := page.Properties
+	if props == nil {
+		props = notionapi.Properties{}
+	}
 	if existingPage.Parent.Type == notionapi.ParentTypePageID {
 		props = remapTitlePropertyForPage(props)
 	}
@@ -168,8 +173,12 @@ func (c *Client) ArchivePage(ctx context.Context, pageID string) error {
 		return fmt.Errorf("rate limit: %w", err)
 	}
 
+	// Properties must be an empty map, not nil.
+	// A nil Properties serializes to JSON null, which the Notion API rejects with:
+	// "body.properties should be an object or `undefined`, instead was `null`"
 	_, err := c.api.Page.Update(ctx, notionapi.PageID(pageID), &notionapi.PageUpdateRequest{
-		Archived: true,
+		Properties: notionapi.Properties{},
+		Archived:   true,
 	})
 	if err != nil {
 		return fmt.Errorf("archive page: %w", err)
