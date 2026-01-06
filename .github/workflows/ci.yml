@@ -83,6 +83,8 @@ jobs:
   e2e:
     name: E2E Tests
     runs-on: ubuntu-latest
+    # E2E failures don't block CI - they depend on external Notion secrets
+    continue-on-error: true
     # Only run for pushes or PRs from the same repo (not forks)
     # yamllint disable-line rule:line-length
     if: >-
