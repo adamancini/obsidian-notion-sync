@@ -1,0 +1,75 @@
+# golangci-lint configuration for obsidian-notion-sync
+# golangci-lint v2 format
+# See: https://golangci-lint.run/usage/configuration/
+
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  default: standard
+  enable:
+    # Code quality
+    - misspell      # Finds commonly misspelled words
+    - unconvert     # Removes unnecessary type conversions
+    - goconst       # Finds repeated strings that could be constants
+    - dupl          # Detects code clones
+
+    # Security
+    - gosec         # Security checks
+
+    # Performance
+    - prealloc      # Finds slice declarations that could be pre-allocated
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: false
+    exclude-functions:
+      - fmt.Print
+      - fmt.Printf
+      - fmt.Println
+      - fmt.Fprint
+      - fmt.Fprintf
+      - fmt.Fprintln
+
+  govet:
+    disable:
+      - fieldalignment
+
+  staticcheck:
+    checks:
+      - all
+      - -SA1019  # Allow deprecated API usage
+
+  gosec:
+    excludes:
+      - G104  # Covered by errcheck
+      - G304  # File path taint expected for CLI
+
+  misspell:
+    locale: US
+
+  goconst:
+    min-len: 3
+    min-occurrences: 3
+
+  dupl:
+    threshold: 150
+
+issues:
+  max-issues-per-linter: 50
+  max-same-issues: 10
+
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - dupl
+        - gosec
+        - errcheck
+
+    - text: "G301:"
+      linters:
+        - gosec
