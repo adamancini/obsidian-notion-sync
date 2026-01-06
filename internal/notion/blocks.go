@@ -84,16 +84,130 @@ func (c *Client) DeleteBlock(ctx context.Context, blockID string) error {
 }
 
 // UpdateBlock updates a block's content.
+// Different block types have different updatable fields, so this method
+// builds a type-specific update request based on the block type.
 func (c *Client) UpdateBlock(ctx context.Context, blockID string, block notionapi.Block) (notionapi.Block, error) {
 	if err := c.wait(ctx); err != nil {
 		return nil, fmt.Errorf("rate limit: %w", err)
 	}
 
-	// Note: Notion API update is complex - each block type needs specific handling.
-	// This is a simplified stub.
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		return nil, fmt.Errorf("build update request: %w", err)
+	}
 
-	// TODO: Implement block-type-specific update requests
-	return nil, fmt.Errorf("block update not yet implemented")
+	updatedBlock, err := c.api.Block.Update(ctx, notionapi.BlockID(blockID), req)
+	if err != nil {
+		return nil, fmt.Errorf("update block: %w", err)
+	}
+
+	return updatedBlock, nil
+}
+
+// buildBlockUpdateRequest creates a BlockUpdateRequest from a Block interface.
+// Each block type has specific fields that can be updated via the Notion API.
+func buildBlockUpdateRequest(block notionapi.Block) (*notionapi.BlockUpdateRequest, error) {
+	req := &notionapi.BlockUpdateRequest{}
+
+	switch b := block.(type) {
+	case *notionapi.ParagraphBlock:
+		req.Paragraph = &notionapi.Paragraph{
+			RichText: b.Paragraph.RichText,
+			Color:    b.Paragraph.Color,
+		}
+
+	case *notionapi.Heading1Block:
+		req.Heading1 = &notionapi.Heading{
+			RichText:     b.Heading1.RichText,
+			Color:        b.Heading1.Color,
+			IsToggleable: b.Heading1.IsToggleable,
+		}
+
+	case *notionapi.Heading2Block:
+		req.Heading2 = &notionapi.Heading{
+			RichText:     b.Heading2.RichText,
+			Color:        b.Heading2.Color,
+			IsToggleable: b.Heading2.IsToggleable,
+		}
+
+	case *notionapi.Heading3Block:
+		req.Heading3 = &notionapi.Heading{
+			RichText:     b.Heading3.RichText,
+			Color:        b.Heading3.Color,
+			IsToggleable: b.Heading3.IsToggleable,
+		}
+
+	case *notionapi.BulletedListItemBlock:
+		req.BulletedListItem = &notionapi.ListItem{
+			RichText: b.BulletedListItem.RichText,
+			Color:    b.BulletedListItem.Color,
+		}
+
+	case *notionapi.NumberedListItemBlock:
+		req.NumberedListItem = &notionapi.ListItem{
+			RichText: b.NumberedListItem.RichText,
+			Color:    b.NumberedListItem.Color,
+		}
+
+	case *notionapi.ToDoBlock:
+		req.ToDo = &notionapi.ToDo{
+			RichText: b.ToDo.RichText,
+			Checked:  b.ToDo.Checked,
+			Color:    b.ToDo.Color,
+		}
+
+	case *notionapi.ToggleBlock:
+		req.Toggle = &notionapi.Toggle{
+			RichText: b.Toggle.RichText,
+			Color:    b.Toggle.Color,
+		}
+
+	case *notionapi.QuoteBlock:
+		req.Quote = &notionapi.Quote{
+			RichText: b.Quote.RichText,
+			Color:    b.Quote.Color,
+		}
+
+	case *notionapi.CalloutBlock:
+		req.Callout = &notionapi.Callout{
+			RichText: b.Callout.RichText,
+			Icon:     b.Callout.Icon,
+			Color:    b.Callout.Color,
+		}
+
+	case *notionapi.CodeBlock:
+		req.Code = &notionapi.Code{
+			RichText: b.Code.RichText,
+			Caption:  b.Code.Caption,
+			Language: b.Code.Language,
+		}
+
+	case *notionapi.DividerBlock:
+		// Divider blocks have no updatable content.
+		// Return an empty request which is valid for the API.
+		// The API will accept this and return the unchanged block.
+
+	case *notionapi.EquationBlock:
+		req.Equation = &notionapi.Equation{
+			Expression: b.Equation.Expression,
+		}
+
+	case *notionapi.BookmarkBlock:
+		req.Bookmark = &notionapi.Bookmark{
+			URL:     b.Bookmark.URL,
+			Caption: b.Bookmark.Caption,
+		}
+
+	case *notionapi.TableRowBlock:
+		req.TableRow = &notionapi.TableRow{
+			Cells: b.TableRow.Cells,
+		}
+
+	default:
+		return nil, fmt.Errorf("unsupported block type for update: %T", block)
+	}
+
+	return req, nil
 }
 
 // hasChildren checks if a block has child blocks.

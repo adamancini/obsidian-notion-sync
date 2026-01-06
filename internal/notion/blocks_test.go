@@ -401,3 +401,460 @@ func TestSetBlockChildren(t *testing.T) {
 		})
 	}
 }
+
+// Helper function to create RichText for tests.
+func testRichText(content string) []notionapi.RichText {
+	return []notionapi.RichText{
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: content},
+		},
+	}
+}
+
+func TestBuildBlockUpdateRequest_Paragraph(t *testing.T) {
+	block := &notionapi.ParagraphBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "para-123"},
+		Paragraph: notionapi.Paragraph{
+			RichText: testRichText("Hello, world!"),
+			Color:    "blue",
+		},
+	}
+
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if req.Paragraph == nil {
+		t.Fatal("expected Paragraph to be set")
+	}
+	if len(req.Paragraph.RichText) != 1 {
+		t.Errorf("expected 1 RichText, got %d", len(req.Paragraph.RichText))
+	}
+	if req.Paragraph.Color != "blue" {
+		t.Errorf("expected color blue, got %s", req.Paragraph.Color)
+	}
+}
+
+func TestBuildBlockUpdateRequest_Headings(t *testing.T) {
+	tests := []struct {
+		name  string
+		block notionapi.Block
+		check func(*notionapi.BlockUpdateRequest) bool
+	}{
+		{
+			name: "heading1",
+			block: &notionapi.Heading1Block{
+				BasicBlock: notionapi.BasicBlock{ID: "h1-123"},
+				Heading1: notionapi.Heading{
+					RichText:     testRichText("Heading 1"),
+					Color:        "red",
+					IsToggleable: true,
+				},
+			},
+			check: func(req *notionapi.BlockUpdateRequest) bool {
+				return req.Heading1 != nil &&
+					len(req.Heading1.RichText) == 1 &&
+					req.Heading1.Color == "red" &&
+					req.Heading1.IsToggleable == true
+			},
+		},
+		{
+			name: "heading2",
+			block: &notionapi.Heading2Block{
+				BasicBlock: notionapi.BasicBlock{ID: "h2-123"},
+				Heading2: notionapi.Heading{
+					RichText: testRichText("Heading 2"),
+					Color:    "green",
+				},
+			},
+			check: func(req *notionapi.BlockUpdateRequest) bool {
+				return req.Heading2 != nil &&
+					len(req.Heading2.RichText) == 1 &&
+					req.Heading2.Color == "green"
+			},
+		},
+		{
+			name: "heading3",
+			block: &notionapi.Heading3Block{
+				BasicBlock: notionapi.BasicBlock{ID: "h3-123"},
+				Heading3: notionapi.Heading{
+					RichText: testRichText("Heading 3"),
+				},
+			},
+			check: func(req *notionapi.BlockUpdateRequest) bool {
+				return req.Heading3 != nil && len(req.Heading3.RichText) == 1
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := buildBlockUpdateRequest(tt.block)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tt.check(req) {
+				t.Errorf("request validation failed")
+			}
+		})
+	}
+}
+
+func TestBuildBlockUpdateRequest_ListItems(t *testing.T) {
+	tests := []struct {
+		name  string
+		block notionapi.Block
+		check func(*notionapi.BlockUpdateRequest) bool
+	}{
+		{
+			name: "bulleted list item",
+			block: &notionapi.BulletedListItemBlock{
+				BasicBlock: notionapi.BasicBlock{ID: "bullet-123"},
+				BulletedListItem: notionapi.ListItem{
+					RichText: testRichText("Bullet point"),
+					Color:    "yellow",
+				},
+			},
+			check: func(req *notionapi.BlockUpdateRequest) bool {
+				return req.BulletedListItem != nil &&
+					len(req.BulletedListItem.RichText) == 1 &&
+					req.BulletedListItem.Color == "yellow"
+			},
+		},
+		{
+			name: "numbered list item",
+			block: &notionapi.NumberedListItemBlock{
+				BasicBlock: notionapi.BasicBlock{ID: "num-123"},
+				NumberedListItem: notionapi.ListItem{
+					RichText: testRichText("Numbered item"),
+					Color:    "purple",
+				},
+			},
+			check: func(req *notionapi.BlockUpdateRequest) bool {
+				return req.NumberedListItem != nil &&
+					len(req.NumberedListItem.RichText) == 1 &&
+					req.NumberedListItem.Color == "purple"
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, err := buildBlockUpdateRequest(tt.block)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !tt.check(req) {
+				t.Errorf("request validation failed")
+			}
+		})
+	}
+}
+
+func TestBuildBlockUpdateRequest_ToDo(t *testing.T) {
+	tests := []struct {
+		name    string
+		checked bool
+	}{
+		{name: "unchecked todo", checked: false},
+		{name: "checked todo", checked: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			block := &notionapi.ToDoBlock{
+				BasicBlock: notionapi.BasicBlock{ID: "todo-123"},
+				ToDo: notionapi.ToDo{
+					RichText: testRichText("Task item"),
+					Checked:  tt.checked,
+					Color:    "default",
+				},
+			}
+
+			req, err := buildBlockUpdateRequest(block)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			if req.ToDo == nil {
+				t.Fatal("expected ToDo to be set")
+			}
+			if req.ToDo.Checked != tt.checked {
+				t.Errorf("expected checked=%v, got %v", tt.checked, req.ToDo.Checked)
+			}
+			if len(req.ToDo.RichText) != 1 {
+				t.Errorf("expected 1 RichText, got %d", len(req.ToDo.RichText))
+			}
+		})
+	}
+}
+
+func TestBuildBlockUpdateRequest_Toggle(t *testing.T) {
+	block := &notionapi.ToggleBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "toggle-123"},
+		Toggle: notionapi.Toggle{
+			RichText: testRichText("Toggle header"),
+			Color:    "gray",
+		},
+	}
+
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if req.Toggle == nil {
+		t.Fatal("expected Toggle to be set")
+	}
+	if len(req.Toggle.RichText) != 1 {
+		t.Errorf("expected 1 RichText, got %d", len(req.Toggle.RichText))
+	}
+	if req.Toggle.Color != "gray" {
+		t.Errorf("expected color gray, got %s", req.Toggle.Color)
+	}
+}
+
+func TestBuildBlockUpdateRequest_Quote(t *testing.T) {
+	block := &notionapi.QuoteBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "quote-123"},
+		Quote: notionapi.Quote{
+			RichText: testRichText("Famous quote"),
+			Color:    "orange",
+		},
+	}
+
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if req.Quote == nil {
+		t.Fatal("expected Quote to be set")
+	}
+	if len(req.Quote.RichText) != 1 {
+		t.Errorf("expected 1 RichText, got %d", len(req.Quote.RichText))
+	}
+	if req.Quote.Color != "orange" {
+		t.Errorf("expected color orange, got %s", req.Quote.Color)
+	}
+}
+
+func TestBuildBlockUpdateRequest_Callout(t *testing.T) {
+	emoji := notionapi.Emoji("warning")
+	block := &notionapi.CalloutBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "callout-123"},
+		Callout: notionapi.Callout{
+			RichText: testRichText("Important note"),
+			Icon: &notionapi.Icon{
+				Type:  "emoji",
+				Emoji: &emoji,
+			},
+			Color: "yellow_background",
+		},
+	}
+
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if req.Callout == nil {
+		t.Fatal("expected Callout to be set")
+	}
+	if len(req.Callout.RichText) != 1 {
+		t.Errorf("expected 1 RichText, got %d", len(req.Callout.RichText))
+	}
+	if req.Callout.Icon == nil {
+		t.Error("expected Icon to be set")
+	}
+	if req.Callout.Color != "yellow_background" {
+		t.Errorf("expected color yellow_background, got %s", req.Callout.Color)
+	}
+}
+
+func TestBuildBlockUpdateRequest_Code(t *testing.T) {
+	block := &notionapi.CodeBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "code-123"},
+		Code: notionapi.Code{
+			RichText: testRichText("func main() {}"),
+			Caption:  testRichText("Go code example"),
+			Language: "go",
+		},
+	}
+
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if req.Code == nil {
+		t.Fatal("expected Code to be set")
+	}
+	if len(req.Code.RichText) != 1 {
+		t.Errorf("expected 1 RichText for code, got %d", len(req.Code.RichText))
+	}
+	if len(req.Code.Caption) != 1 {
+		t.Errorf("expected 1 RichText for caption, got %d", len(req.Code.Caption))
+	}
+	if req.Code.Language != "go" {
+		t.Errorf("expected language go, got %s", req.Code.Language)
+	}
+}
+
+func TestBuildBlockUpdateRequest_Divider(t *testing.T) {
+	block := &notionapi.DividerBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "div-123"},
+	}
+
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Divider blocks have no content to update.
+	// The request should be valid but empty.
+	if req == nil {
+		t.Fatal("expected non-nil request")
+	}
+}
+
+func TestBuildBlockUpdateRequest_Equation(t *testing.T) {
+	block := &notionapi.EquationBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "eq-123"},
+		Equation: notionapi.Equation{
+			Expression: "E = mc^2",
+		},
+	}
+
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if req.Equation == nil {
+		t.Fatal("expected Equation to be set")
+	}
+	if req.Equation.Expression != "E = mc^2" {
+		t.Errorf("expected expression 'E = mc^2', got %s", req.Equation.Expression)
+	}
+}
+
+func TestBuildBlockUpdateRequest_Bookmark(t *testing.T) {
+	block := &notionapi.BookmarkBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "bookmark-123"},
+		Bookmark: notionapi.Bookmark{
+			URL:     "https://example.com",
+			Caption: testRichText("Example website"),
+		},
+	}
+
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if req.Bookmark == nil {
+		t.Fatal("expected Bookmark to be set")
+	}
+	if req.Bookmark.URL != "https://example.com" {
+		t.Errorf("expected URL 'https://example.com', got %s", req.Bookmark.URL)
+	}
+	if len(req.Bookmark.Caption) != 1 {
+		t.Errorf("expected 1 RichText for caption, got %d", len(req.Bookmark.Caption))
+	}
+}
+
+func TestBuildBlockUpdateRequest_TableRow(t *testing.T) {
+	block := &notionapi.TableRowBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "row-123"},
+		TableRow: notionapi.TableRow{
+			Cells: [][]notionapi.RichText{
+				testRichText("Cell 1"),
+				testRichText("Cell 2"),
+				testRichText("Cell 3"),
+			},
+		},
+	}
+
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if req.TableRow == nil {
+		t.Fatal("expected TableRow to be set")
+	}
+	if len(req.TableRow.Cells) != 3 {
+		t.Errorf("expected 3 cells, got %d", len(req.TableRow.Cells))
+	}
+}
+
+func TestBuildBlockUpdateRequest_UnsupportedType(t *testing.T) {
+	// Test with a block type that's not supported for updates.
+	block := &notionapi.ChildDatabaseBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "child-db-123"},
+	}
+
+	_, err := buildBlockUpdateRequest(block)
+	if err == nil {
+		t.Fatal("expected error for unsupported block type")
+	}
+	if err.Error() != "unsupported block type for update: *notionapi.ChildDatabaseBlock" {
+		t.Errorf("unexpected error message: %s", err.Error())
+	}
+}
+
+func TestBuildBlockUpdateRequest_PreservesRichTextFormatting(t *testing.T) {
+	// Test that rich text with formatting is preserved.
+	richText := []notionapi.RichText{
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: "Bold text"},
+			Annotations: &notionapi.Annotations{
+				Bold:  true,
+				Color: "blue",
+			},
+		},
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: " and "},
+		},
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: "italic text"},
+			Annotations: &notionapi.Annotations{
+				Italic: true,
+			},
+		},
+	}
+
+	block := &notionapi.ParagraphBlock{
+		BasicBlock: notionapi.BasicBlock{ID: "para-123"},
+		Paragraph: notionapi.Paragraph{
+			RichText: richText,
+		},
+	}
+
+	req, err := buildBlockUpdateRequest(block)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(req.Paragraph.RichText) != 3 {
+		t.Fatalf("expected 3 RichText items, got %d", len(req.Paragraph.RichText))
+	}
+
+	// Verify first item has bold annotation.
+	if req.Paragraph.RichText[0].Annotations == nil ||
+		!req.Paragraph.RichText[0].Annotations.Bold {
+		t.Error("expected first item to have bold annotation")
+	}
+
+	// Verify third item has italic annotation.
+	if req.Paragraph.RichText[2].Annotations == nil ||
+		!req.Paragraph.RichText[2].Annotations.Italic {
+		t.Error("expected third item to have italic annotation")
+	}
+}
