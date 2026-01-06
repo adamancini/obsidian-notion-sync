@@ -26,7 +26,7 @@ type ResolveResult struct {
 
 // LinkSuggestion represents a possible match for an unresolved link.
 type LinkSuggestion struct {
-	Target      string       // Original unresolved target
+	Target      string // Original unresolved target
 	Suggestions []MatchResult
 }
 
@@ -98,13 +98,71 @@ func (r *LinkRegistry) UpdateSourcePath(oldPath, newPath string) error {
 	return err
 }
 
+// RegisterAlias registers an alias (title or frontmatter alias) for a file path.
+// This enables wiki-link resolution by title when the title differs from the filename.
+// aliasType should be "title", "alias", or "filename".
+func (r *LinkRegistry) RegisterAlias(obsidianPath, aliasName, aliasType string) error {
+	_, err := r.db.conn.Exec(`
+		INSERT INTO page_aliases (obsidian_path, alias_name, alias_type)
+		VALUES (?, ?, ?)
+		ON CONFLICT(obsidian_path, alias_name) DO UPDATE SET
+			alias_type = excluded.alias_type
+	`, obsidianPath, aliasName, aliasType)
+	return err
+}
+
+// RegisterAliases registers multiple aliases for a file path.
+func (r *LinkRegistry) RegisterAliases(obsidianPath string, aliases []string, aliasType string) error {
+	tx, err := r.db.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(`
+		INSERT INTO page_aliases (obsidian_path, alias_name, alias_type)
+		VALUES (?, ?, ?)
+		ON CONFLICT(obsidian_path, alias_name) DO UPDATE SET
+			alias_type = excluded.alias_type
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare statement: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, alias := range aliases {
+		if alias == "" {
+			continue
+		}
+		if _, err := stmt.Exec(obsidianPath, alias, aliasType); err != nil {
+			return fmt.Errorf("insert alias: %w", err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// ClearAliases removes all aliases for a file path.
+func (r *LinkRegistry) ClearAliases(obsidianPath string) error {
+	_, err := r.db.conn.Exec(`DELETE FROM page_aliases WHERE obsidian_path = ?`, obsidianPath)
+	return err
+}
+
+// UpdateAliasPath updates aliases when a file is renamed.
+func (r *LinkRegistry) UpdateAliasPath(oldPath, newPath string) error {
+	_, err := r.db.conn.Exec(`UPDATE page_aliases SET obsidian_path = ? WHERE obsidian_path = ?`, newPath, oldPath)
+	return err
+}
+
 // Resolve looks up a wiki-link target and returns the Notion page ID.
 // This implements the transformer.LinkResolver interface.
 func (r *LinkRegistry) Resolve(target string) (notionPageID string, found bool) {
 	// Resolution order:
 	// 1. Exact path match (if target contains /)
-	// 2. Name match in sync_state
-	// 3. Alias match (from frontmatter)
+	// 2. Name match in sync_state (by filename)
+	// 3. Alias match (from frontmatter title/aliases)
+
+	normalizedTarget := normalizeTarget(target)
 
 	// Try exact path match first.
 	if strings.Contains(target, "/") {
@@ -112,7 +170,7 @@ func (r *LinkRegistry) Resolve(target string) (notionPageID string, found bool) 
 		err := r.db.conn.QueryRow(`
 			SELECT notion_page_id FROM sync_state
 			WHERE obsidian_path = ? AND notion_page_id IS NOT NULL
-		`, normalizeTarget(target)).Scan(&pageID)
+		`, normalizedTarget).Scan(&pageID)
 		if err == nil && pageID.Valid {
 			return pageID.String, true
 		}
@@ -120,7 +178,6 @@ func (r *LinkRegistry) Resolve(target string) (notionPageID string, found bool) 
 
 	// Try name match (file name without extension).
 	var pageID sql.NullString
-	normalizedTarget := normalizeTarget(target)
 
 	// Match by file name (last component of path, without .md).
 	err := r.db.conn.QueryRow(`
@@ -135,6 +192,28 @@ func (r *LinkRegistry) Resolve(target string) (notionPageID string, found bool) 
 	`, normalizedTarget, normalizedTarget, normalizedTarget).Scan(&pageID)
 	if err == nil && pageID.Valid {
 		return pageID.String, true
+	}
+
+	// Try alias match (title or frontmatter alias).
+	// This allows [[Target Note]] to resolve to target-note.md if that file
+	// has `title: Target Note` in its frontmatter.
+	var obsidianPath string
+	err = r.db.conn.QueryRow(`
+		SELECT pa.obsidian_path
+		FROM page_aliases pa
+		JOIN sync_state ss ON pa.obsidian_path = ss.obsidian_path
+		WHERE pa.alias_name = ? AND ss.notion_page_id IS NOT NULL
+		LIMIT 1
+	`, target).Scan(&obsidianPath)
+	if err == nil && obsidianPath != "" {
+		// Found alias, now get the page ID.
+		err = r.db.conn.QueryRow(`
+			SELECT notion_page_id FROM sync_state
+			WHERE obsidian_path = ?
+		`, obsidianPath).Scan(&pageID)
+		if err == nil && pageID.Valid {
+			return pageID.String, true
+		}
 	}
 
 	return "", false
@@ -416,14 +495,14 @@ func (r *LinkRegistry) RepairLinks(dryRun bool) ([]RepairResult, error) {
 		if len(matches) > 0 && matches[0].Score >= MatchFuzzy {
 			match := matches[0]
 			result := RepairResult{
-				SourcePath:   link.SourcePath,
-				TargetName:   link.TargetName,
-				MatchedPath:  match.Path,
-				MatchedID:    match.PageID,
-				Score:        match.Score,
-				Distance:     match.Distance,
-				WouldRepair:  true,
-				WasRepaired:  false,
+				SourcePath:  link.SourcePath,
+				TargetName:  link.TargetName,
+				MatchedPath: match.Path,
+				MatchedID:   match.PageID,
+				Score:       match.Score,
+				Distance:    match.Distance,
+				WouldRepair: true,
+				WasRepaired: false,
 			}
 
 			if !dryRun {

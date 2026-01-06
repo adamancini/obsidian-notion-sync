@@ -100,6 +100,15 @@ func (db *DB) initSchema() error {
 		value TEXT
 	);
 
+	-- Page aliases for wiki-link resolution by title/alias
+	-- Maps frontmatter titles and aliases to obsidian paths
+	CREATE TABLE IF NOT EXISTS page_aliases (
+		obsidian_path TEXT NOT NULL,
+		alias_name TEXT NOT NULL,
+		alias_type TEXT DEFAULT 'title',
+		PRIMARY KEY (obsidian_path, alias_name)
+	);
+
 	-- Indexes
 	CREATE INDEX IF NOT EXISTS idx_sync_state_status ON sync_state(status);
 	CREATE INDEX IF NOT EXISTS idx_sync_state_notion_page ON sync_state(notion_page_id);
@@ -109,6 +118,9 @@ func (db *DB) initSchema() error {
 
 	-- Unique constraint to prevent duplicate links
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_links_unique ON links(source_path, target_name);
+
+	-- Index for fast alias lookups by name
+	CREATE INDEX IF NOT EXISTS idx_aliases_name ON page_aliases(alias_name);
 	`
 
 	_, err := db.conn.Exec(schema)

@@ -503,6 +503,35 @@ func (pc *pushContext) processFile(ctx context.Context, f pushFile) (pushResult,
 		return pushResult{}, fmt.Errorf("parse markdown: %w", err)
 	}
 
+	// Register title and aliases for wiki-link resolution.
+	// This allows [[Title]] to resolve to filename.md when title differs from filename.
+	_ = pc.linkRegistry.ClearAliases(f.path) // Clear old aliases first
+	if title, ok := note.Frontmatter["title"].(string); ok && title != "" {
+		if err := pc.linkRegistry.RegisterAlias(f.path, title, "title"); err != nil {
+			// Non-fatal: log but continue
+			fmt.Fprintf(os.Stderr, "  Warning: failed to register title alias for %s: %v\n", f.path, err)
+		}
+	}
+	// Also register aliases from frontmatter.
+	if aliases, ok := note.Frontmatter["aliases"]; ok {
+		var aliasStrings []string
+		switch v := aliases.(type) {
+		case []any:
+			for _, a := range v {
+				if s, ok := a.(string); ok && s != "" {
+					aliasStrings = append(aliasStrings, s)
+				}
+			}
+		case []string:
+			aliasStrings = v
+		}
+		if len(aliasStrings) > 0 {
+			if err := pc.linkRegistry.RegisterAliases(f.path, aliasStrings, "alias"); err != nil {
+				fmt.Fprintf(os.Stderr, "  Warning: failed to register aliases for %s: %v\n", f.path, err)
+			}
+		}
+	}
+
 	// Register wiki-links for two-pass resolution.
 	// Clear existing links first (in case file was modified and links changed).
 	_ = pc.linkRegistry.ClearLinksFrom(f.path)

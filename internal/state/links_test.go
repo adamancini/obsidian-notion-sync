@@ -606,3 +606,60 @@ func TestLinkRegistry_GetStats(t *testing.T) {
 		t.Errorf("bySource[note-b.md] = %d; want 1", stats.BySource["note-b.md"])
 	}
 }
+
+// TestLinkRegistry_ResolveByTitle tests resolving wiki-links by frontmatter title
+// when the title differs from the filename. This is the bug from ANN-42.
+//
+// In Obsidian, [[Target Note]] should resolve to target-note.md if that file
+// has `title: Target Note` in its frontmatter.
+func TestLinkRegistry_ResolveByTitle(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	registry := NewLinkRegistry(db)
+
+	// Create sync state with kebab-case filename (how files are often named).
+	err = db.SetState(&SyncState{
+		ObsidianPath: "target-note.md",
+		NotionPageID: "notion-page-123",
+		Status:       "synced",
+	})
+	if err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+
+	// Register the title as an alias (simulating what push should do).
+	err = registry.RegisterAlias("target-note.md", "Target Note", "title")
+	if err != nil {
+		t.Fatalf("register alias: %v", err)
+	}
+
+	// Now [[Target Note]] should resolve to the page, even though the
+	// filename is target-note.md (different from the title).
+	pageID, found := registry.Resolve("Target Note")
+	if !found {
+		t.Error("expected to resolve 'Target Note' by title alias")
+	}
+	if pageID != "notion-page-123" {
+		t.Errorf("expected page ID 'notion-page-123', got '%s'", pageID)
+	}
+
+	// Resolving by filename should still work.
+	pageID, found = registry.Resolve("target-note")
+	if !found {
+		t.Error("expected to resolve 'target-note' by filename")
+	}
+	if pageID != "notion-page-123" {
+		t.Errorf("expected page ID 'notion-page-123', got '%s'", pageID)
+	}
+}
