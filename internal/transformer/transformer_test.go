@@ -1407,6 +1407,437 @@ func TestIsImageFile(t *testing.T) {
 	}
 }
 
+// TestTransformNestedList_TwoLevelBulleted tests nested bulleted lists (ANN-35).
+func TestTransformNestedList_TwoLevelBulleted(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte(`- Item 1
+  - Nested 1.1
+  - Nested 1.2
+- Item 2
+`)
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Should have 2 top-level bulleted list items.
+	topLevelCount := 0
+	var firstItem *notionapi.BulletedListItemBlock
+	for _, block := range page.Children {
+		if bi, ok := block.(*notionapi.BulletedListItemBlock); ok {
+			topLevelCount++
+			if firstItem == nil {
+				firstItem = bi
+			}
+		}
+	}
+
+	if topLevelCount != 2 {
+		t.Errorf("top level bullet count = %d, want 2", topLevelCount)
+	}
+
+	if firstItem == nil {
+		t.Fatal("first item not found")
+	}
+
+	// First item should have 2 nested children.
+	if len(firstItem.BulletedListItem.Children) != 2 {
+		t.Errorf("nested children count = %d, want 2", len(firstItem.BulletedListItem.Children))
+	}
+
+	// Verify nested children are bulleted list items.
+	for i, child := range firstItem.BulletedListItem.Children {
+		if child.GetType() != notionapi.BlockTypeBulletedListItem {
+			t.Errorf("nested child %d type = %v, want bulleted_list_item", i, child.GetType())
+		}
+	}
+}
+
+// TestTransformNestedList_ThreeLevelDeep tests deeply nested lists (ANN-35).
+func TestTransformNestedList_ThreeLevelDeep(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte(`- Level 1
+  - Level 2
+    - Level 3
+`)
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find the top-level item.
+	var level1 *notionapi.BulletedListItemBlock
+	for _, block := range page.Children {
+		if bi, ok := block.(*notionapi.BulletedListItemBlock); ok {
+			level1 = bi
+			break
+		}
+	}
+
+	if level1 == nil {
+		t.Fatal("level 1 item not found")
+	}
+
+	// Check level 1 has level 2 child.
+	if len(level1.BulletedListItem.Children) != 1 {
+		t.Fatalf("level 1 should have 1 child, got %d", len(level1.BulletedListItem.Children))
+	}
+
+	level2, ok := level1.BulletedListItem.Children[0].(*notionapi.BulletedListItemBlock)
+	if !ok {
+		t.Fatalf("level 2 child is not BulletedListItemBlock, got %T", level1.BulletedListItem.Children[0])
+	}
+
+	// Check level 2 has level 3 child.
+	if len(level2.BulletedListItem.Children) != 1 {
+		t.Fatalf("level 2 should have 1 child, got %d", len(level2.BulletedListItem.Children))
+	}
+
+	level3, ok := level2.BulletedListItem.Children[0].(*notionapi.BulletedListItemBlock)
+	if !ok {
+		t.Fatalf("level 3 child is not BulletedListItemBlock, got %T", level2.BulletedListItem.Children[0])
+	}
+
+	// Level 3 should have no children.
+	if len(level3.BulletedListItem.Children) != 0 {
+		t.Errorf("level 3 should have no children, got %d", len(level3.BulletedListItem.Children))
+	}
+}
+
+// TestTransformNestedList_MixedBulletNumbered tests mixed bullet/numbered nesting (ANN-35).
+func TestTransformNestedList_MixedBulletNumbered(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte(`- Bullet item
+  1. Numbered nested 1
+  2. Numbered nested 2
+`)
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find the top-level bulleted item.
+	var bulletItem *notionapi.BulletedListItemBlock
+	for _, block := range page.Children {
+		if bi, ok := block.(*notionapi.BulletedListItemBlock); ok {
+			bulletItem = bi
+			break
+		}
+	}
+
+	if bulletItem == nil {
+		t.Fatal("bullet item not found")
+	}
+
+	// Should have 2 numbered children.
+	if len(bulletItem.BulletedListItem.Children) != 2 {
+		t.Errorf("nested children count = %d, want 2", len(bulletItem.BulletedListItem.Children))
+	}
+
+	// Verify nested children are numbered list items.
+	for i, child := range bulletItem.BulletedListItem.Children {
+		if child.GetType() != notionapi.BlockTypeNumberedListItem {
+			t.Errorf("nested child %d type = %v, want numbered_list_item", i, child.GetType())
+		}
+	}
+}
+
+// TestTransformNestedList_NumberedWithBullets tests numbered list with bullet children (ANN-35).
+func TestTransformNestedList_NumberedWithBullets(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte(`1. First item
+   - Sub bullet A
+   - Sub bullet B
+2. Second item
+`)
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Should have 2 top-level numbered items.
+	var numberedItems []*notionapi.NumberedListItemBlock
+	for _, block := range page.Children {
+		if ni, ok := block.(*notionapi.NumberedListItemBlock); ok {
+			numberedItems = append(numberedItems, ni)
+		}
+	}
+
+	if len(numberedItems) != 2 {
+		t.Errorf("numbered items count = %d, want 2", len(numberedItems))
+	}
+
+	if len(numberedItems) == 0 {
+		t.Fatal("no numbered items found")
+	}
+
+	// First item should have 2 bulleted children.
+	if len(numberedItems[0].NumberedListItem.Children) != 2 {
+		t.Errorf("first item children count = %d, want 2", len(numberedItems[0].NumberedListItem.Children))
+	}
+
+	// Verify children are bulleted.
+	for i, child := range numberedItems[0].NumberedListItem.Children {
+		if child.GetType() != notionapi.BlockTypeBulletedListItem {
+			t.Errorf("child %d type = %v, want bulleted_list_item", i, child.GetType())
+		}
+	}
+}
+
+// TestTransformNestedList_TaskWithSubtasks tests task items with nested subtasks (ANN-35).
+func TestTransformNestedList_TaskWithSubtasks(t *testing.T) {
+	// Create a markdown parser with task list extension.
+	md := goldmark.New(
+		goldmark.WithExtensions(extension.TaskList),
+	)
+
+	content := []byte(`- [x] Main task
+  - [ ] Subtask 1
+  - [x] Subtask 2
+`)
+	reader := text.NewReader(content)
+	doc := md.Parser().Parse(reader)
+
+	tr := New(nil, nil)
+
+	note := &parser.ParsedNote{
+		Path:   "test.md",
+		AST:    doc,
+		Source: content,
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find the main task.
+	var mainTask *notionapi.ToDoBlock
+	for _, block := range page.Children {
+		if td, ok := block.(*notionapi.ToDoBlock); ok {
+			mainTask = td
+			break
+		}
+	}
+
+	if mainTask == nil {
+		t.Fatal("main task not found")
+	}
+
+	// Main task should be checked.
+	if !mainTask.ToDo.Checked {
+		t.Error("main task should be checked")
+	}
+
+	// Should have 2 subtask children.
+	if len(mainTask.ToDo.Children) != 2 {
+		t.Errorf("subtasks count = %d, want 2", len(mainTask.ToDo.Children))
+	}
+
+	// Verify subtasks are to-do items.
+	for i, child := range mainTask.ToDo.Children {
+		if child.GetType() != notionapi.BlockTypeToDo {
+			t.Errorf("subtask %d type = %v, want to_do", i, child.GetType())
+		}
+	}
+}
+
+// TestTransformNestedList_PreservesContent tests that nested items preserve their text content (ANN-35).
+func TestTransformNestedList_PreservesContent(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte(`- Parent item with text
+  - Child with **bold** text
+`)
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find the parent item.
+	var parent *notionapi.BulletedListItemBlock
+	for _, block := range page.Children {
+		if bi, ok := block.(*notionapi.BulletedListItemBlock); ok {
+			parent = bi
+			break
+		}
+	}
+
+	if parent == nil {
+		t.Fatal("parent item not found")
+	}
+
+	// Check parent has content.
+	if len(parent.BulletedListItem.RichText) == 0 {
+		t.Error("parent should have rich text content")
+	}
+
+	// Check there's a child.
+	if len(parent.BulletedListItem.Children) == 0 {
+		t.Fatal("parent should have children")
+	}
+
+	child, ok := parent.BulletedListItem.Children[0].(*notionapi.BulletedListItemBlock)
+	if !ok {
+		t.Fatalf("child is not BulletedListItemBlock, got %T", parent.BulletedListItem.Children[0])
+	}
+
+	// Child should have rich text content.
+	if len(child.BulletedListItem.RichText) == 0 {
+		t.Error("child should have rich text content")
+	}
+
+	// Verify bold formatting is preserved in child.
+	hasBold := false
+	for _, rt := range child.BulletedListItem.RichText {
+		if rt.Annotations != nil && rt.Annotations.Bold {
+			hasBold = true
+			break
+		}
+	}
+
+	if !hasBold {
+		t.Error("child should have bold formatted text")
+	}
+}
+
+// TestTransformNestedList_SingleLevel tests that single-level lists have no children (ANN-35).
+func TestTransformNestedList_SingleLevel(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte(`- Item 1
+- Item 2
+- Item 3
+`)
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// All items should have no children.
+	for _, block := range page.Children {
+		if bi, ok := block.(*notionapi.BulletedListItemBlock); ok {
+			if len(bi.BulletedListItem.Children) != 0 {
+				t.Errorf("single-level list item should have no children, got %d", len(bi.BulletedListItem.Children))
+			}
+		}
+	}
+}
+
+// TestTransformNestedList_EmptyNested tests that items with empty nested lists work correctly.
+func TestTransformNestedList_EmptyNested(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	// Just a regular list - no nested items.
+	content := []byte("- Just an item\n")
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	if len(page.Children) == 0 {
+		t.Fatal("page should have children")
+	}
+
+	bi, ok := page.Children[0].(*notionapi.BulletedListItemBlock)
+	if !ok {
+		t.Fatalf("expected BulletedListItemBlock, got %T", page.Children[0])
+	}
+
+	// Children should be nil or empty, both are valid.
+	if bi.BulletedListItem.Children != nil && len(bi.BulletedListItem.Children) != 0 {
+		t.Errorf("item with no nesting should have empty children, got %d", len(bi.BulletedListItem.Children))
+	}
+}
+
+// TestExtractNestedChildren_DirectAST tests the extractNestedChildren function directly.
+func TestExtractNestedChildren_DirectAST(t *testing.T) {
+	tr := New(nil, nil)
+
+	// Create a list item with a nested list manually.
+	parentItem := ast.NewListItem(0)
+	textBlock := ast.NewTextBlock()
+	parentItem.AppendChild(parentItem, textBlock)
+
+	// Create a nested list.
+	nestedList := ast.NewList('-')
+	nestedItem1 := ast.NewListItem(2)
+	nestedItem1Text := ast.NewTextBlock()
+	nestedItem1.AppendChild(nestedItem1, nestedItem1Text)
+	nestedList.AppendChild(nestedList, nestedItem1)
+
+	nestedItem2 := ast.NewListItem(2)
+	nestedItem2Text := ast.NewTextBlock()
+	nestedItem2.AppendChild(nestedItem2, nestedItem2Text)
+	nestedList.AppendChild(nestedList, nestedItem2)
+
+	parentItem.AppendChild(parentItem, nestedList)
+
+	// Set up the parent list (needed for type detection).
+	parentList := ast.NewList('-')
+	parentList.AppendChild(parentList, parentItem)
+
+	source := []byte{}
+	children := tr.extractNestedChildren(parentItem, source)
+
+	if len(children) != 2 {
+		t.Errorf("extractNestedChildren returned %d children, want 2", len(children))
+	}
+}
+
 // TestSplitCodeContent tests the splitCodeContent helper function directly.
 func TestSplitCodeContent(t *testing.T) {
 	tests := []struct {

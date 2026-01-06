@@ -222,6 +222,7 @@ func (t *Transformer) transformListItem(li *ast.ListItem, source []byte) notiona
 // transformBulletItem creates a bulleted list item block.
 func (t *Transformer) transformBulletItem(li *ast.ListItem, source []byte) notionapi.Block {
 	richText := t.transformListItemContent(li, source)
+	children := t.extractNestedChildren(li, source)
 
 	return &notionapi.BulletedListItemBlock{
 		BasicBlock: notionapi.BasicBlock{
@@ -230,7 +231,7 @@ func (t *Transformer) transformBulletItem(li *ast.ListItem, source []byte) notio
 		},
 		BulletedListItem: notionapi.ListItem{
 			RichText: richText,
-			// TODO: Handle nested children
+			Children: children,
 		},
 	}
 }
@@ -238,6 +239,7 @@ func (t *Transformer) transformBulletItem(li *ast.ListItem, source []byte) notio
 // transformNumberedItem creates a numbered list item block.
 func (t *Transformer) transformNumberedItem(li *ast.ListItem, source []byte) notionapi.Block {
 	richText := t.transformListItemContent(li, source)
+	children := t.extractNestedChildren(li, source)
 
 	return &notionapi.NumberedListItemBlock{
 		BasicBlock: notionapi.BasicBlock{
@@ -246,7 +248,7 @@ func (t *Transformer) transformNumberedItem(li *ast.ListItem, source []byte) not
 		},
 		NumberedListItem: notionapi.ListItem{
 			RichText: richText,
-			// TODO: Handle nested children
+			Children: children,
 		},
 	}
 }
@@ -255,6 +257,7 @@ func (t *Transformer) transformNumberedItem(li *ast.ListItem, source []byte) not
 func (t *Transformer) transformTaskItem(li *ast.ListItem, source []byte) notionapi.Block {
 	richText := t.transformListItemContent(li, source)
 	checked := isTaskChecked(li, source)
+	children := t.extractNestedChildren(li, source)
 
 	return &notionapi.ToDoBlock{
 		BasicBlock: notionapi.BasicBlock{
@@ -264,6 +267,7 @@ func (t *Transformer) transformTaskItem(li *ast.ListItem, source []byte) notiona
 		ToDo: notionapi.ToDo{
 			RichText: richText,
 			Checked:  checked,
+			Children: children,
 		},
 	}
 }
@@ -636,6 +640,30 @@ func (t *Transformer) transformDataviewBlock(cb *ast.FencedCodeBlock, source []b
 }
 
 // Helper functions
+
+// extractNestedChildren extracts nested list items from a list item's children.
+// In goldmark's AST, a list item can have nested lists as children (after the TextBlock/Paragraph).
+// This function finds those nested lists and recursively transforms their items into Notion blocks.
+func (t *Transformer) extractNestedChildren(li *ast.ListItem, source []byte) notionapi.Blocks {
+	var children notionapi.Blocks
+
+	// Walk through children of the list item looking for nested lists.
+	for child := li.FirstChild(); child != nil; child = child.NextSibling() {
+		if nestedList, ok := child.(*ast.List); ok {
+			// Transform each item in the nested list.
+			for item := nestedList.FirstChild(); item != nil; item = item.NextSibling() {
+				if nestedItem, ok := item.(*ast.ListItem); ok {
+					block := t.transformListItem(nestedItem, source)
+					if block != nil {
+						children = append(children, block)
+					}
+				}
+			}
+		}
+	}
+
+	return children
+}
 
 // isTaskItem checks if a list item is a task (checkbox) item.
 // Task items have a TaskCheckBox node as the first child of their content.
