@@ -158,6 +158,8 @@ func runPush(cmd *cobra.Command, args []string) error {
 
 	// 7. Process creates/modifies in parallel.
 	var created, updated int32
+	var results []osync.Task[pushFile, pushResult] // Store results for second pass
+
 	if len(createModify) > 0 {
 		// Initialize worker pool.
 		workers := cfg.RateLimit.Workers
@@ -187,7 +189,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 
 		// Process files in parallel.
-		results := osync.ProcessWithProgress(ctx, pool, createModify, procCtx.processFile, progress.SimpleCallback())
+		results = osync.ProcessWithProgress(ctx, pool, createModify, procCtx.processFile, progress.SimpleCallback())
 		progress.Finish()
 
 		// Collect results.
@@ -209,10 +211,70 @@ func runPush(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 7. Second pass: resolve wiki-links.
+	// 8. Second pass: resolve wiki-links and update pages.
+	// First resolve all links in the database.
 	resolvedCount, _ := linkRegistry.ResolveAll()
-	if resolvedCount > 0 && verbose {
-		fmt.Printf("  Resolved %d wiki-links\n", resolvedCount)
+
+	// Collect newly created pages with wiki-links for second pass update.
+	var pagesNeedingLinkUpdate []pushFile
+	for _, result := range results {
+		if result.Err == nil && result.Result.hasWikiLinks && result.Result.isNew {
+			pagesNeedingLinkUpdate = append(pagesNeedingLinkUpdate, result.Input)
+		}
+	}
+
+	// Update pages with newly resolved wiki-links.
+	var linkUpdates int32
+	if len(pagesNeedingLinkUpdate) > 0 && resolvedCount > 0 {
+		if verbose {
+			fmt.Printf("  Updating %d page(s) with resolved wiki-links...\n", len(pagesNeedingLinkUpdate))
+		}
+
+		// Re-process files to update with resolved links.
+		for _, f := range pagesNeedingLinkUpdate {
+			syncState, err := db.GetState(f.path)
+			if err != nil || syncState == nil {
+				continue
+			}
+
+			// Re-read and re-transform with links now resolvable.
+			fullPath := filepath.Join(cfg.Vault, f.path)
+			content, err := os.ReadFile(fullPath)
+			if err != nil {
+				continue
+			}
+
+			p := parser.New()
+			note, err := p.Parse(f.path, content)
+			if err != nil {
+				continue
+			}
+
+			t := transformer.New(linkRegistry, &transformer.Config{
+				UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
+				CalloutIcons:        cfg.Transform.Callouts,
+				DataviewHandling:    cfg.Transform.Dataview,
+				FlattenHeadings:     true,
+			})
+
+			notionPage, err := t.Transform(note)
+			if err != nil {
+				continue
+			}
+
+			// Update the page with resolved wiki-links.
+			if err := client.UpdatePage(ctx, syncState.NotionPageID, notionPage); err != nil {
+				if verbose {
+					fmt.Fprintf(os.Stderr, "  Warning: failed to update links in %s: %v\n", f.path, err)
+				}
+				continue
+			}
+			atomic.AddInt32(&linkUpdates, 1)
+		}
+	}
+
+	if verbose && (resolvedCount > 0 || linkUpdates > 0) {
+		fmt.Printf("  Resolved %d wiki-links, updated %d page(s)\n", resolvedCount, linkUpdates)
 	}
 
 	// Print summary.
@@ -430,8 +492,9 @@ type pushContext struct {
 
 // pushResult holds the result of processing a single file.
 type pushResult struct {
-	pageID string
-	isNew  bool
+	pageID       string
+	isNew        bool
+	hasWikiLinks bool // Track if file has wiki-links for second pass
 }
 
 // processFile processes a single file for push (create or update).
@@ -447,6 +510,20 @@ func (pc *pushContext) processFile(ctx context.Context, f pushFile) (pushResult,
 	note, err := pc.parser.Parse(f.path, content)
 	if err != nil {
 		return pushResult{}, fmt.Errorf("parse markdown: %w", err)
+	}
+
+	// Register wiki-links for two-pass resolution.
+	// Clear existing links first (in case file was modified and links changed).
+	_ = pc.linkRegistry.ClearLinksFrom(f.path)
+	if len(note.WikiLinks) > 0 {
+		targets := make([]string, len(note.WikiLinks))
+		for i, link := range note.WikiLinks {
+			targets[i] = link.Target
+		}
+		if err := pc.linkRegistry.RegisterLinks(f.path, targets); err != nil {
+			// Non-fatal: log but continue processing
+			fmt.Fprintf(os.Stderr, "  Warning: failed to register links from %s: %v\n", f.path, err)
+		}
 	}
 
 	// Transform to Notion page structure.
@@ -501,5 +578,5 @@ func (pc *pushContext) processFile(ctx context.Context, f pushFile) (pushResult,
 		return pushResult{}, fmt.Errorf("update state: %w", err)
 	}
 
-	return pushResult{pageID: pageID, isNew: isNew}, nil
+	return pushResult{pageID: pageID, isNew: isNew, hasWikiLinks: len(note.WikiLinks) > 0}, nil
 }
