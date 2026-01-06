@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/adamancini/obsidian-notion-sync/internal/config"
+	"github.com/adamancini/obsidian-notion-sync/internal/transformer"
 )
 
 var (
@@ -102,4 +103,26 @@ func getConfig() (*config.Config, error) {
 		return nil, ErrNoConfig
 	}
 	return cfg, nil
+}
+
+// buildTransformerConfig creates a transformer.Config from the app config.
+// If path is provided, it merges global and path-specific property mappings.
+func buildTransformerConfig(cfg *config.Config, path string) *transformer.Config {
+	transformerCfg := &transformer.Config{
+		UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
+		CalloutIcons:        cfg.Transform.Callouts,
+		DataviewHandling:    cfg.Transform.Dataview,
+		FlattenHeadings:     true,
+	}
+
+	// Convert config property mappings to transformer property mappings.
+	configMappings := cfg.GetPropertyMappingsForPath(path)
+	if len(configMappings) > 0 {
+		transformerCfg.PropertyMappings = make([]transformer.PropertyMapping, len(configMappings))
+		for i, m := range configMappings {
+			transformerCfg.PropertyMappings[i] = transformer.PropertyMappingFromConfig(m.Obsidian, m.Notion, m.Type)
+		}
+	}
+
+	return transformerCfg
 }

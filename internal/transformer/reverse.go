@@ -17,8 +17,9 @@ type PathLookup interface {
 
 // ReverseTransformer converts Notion pages back to Obsidian-flavored markdown.
 type ReverseTransformer struct {
-	pathLookup PathLookup
-	config     *Config
+	pathLookup     PathLookup
+	config         *Config
+	propertyMapper *PropertyMapper
 }
 
 // NewReverse creates a new ReverseTransformer.
@@ -26,9 +27,17 @@ func NewReverse(lookup PathLookup, cfg *Config) *ReverseTransformer {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
+
+	// Create property mapper from config or use defaults.
+	var mappings []PropertyMapping
+	if len(cfg.PropertyMappings) > 0 {
+		mappings = cfg.PropertyMappings
+	}
+
 	return &ReverseTransformer{
-		pathLookup: lookup,
-		config:     cfg,
+		pathLookup:     lookup,
+		config:         cfg,
+		propertyMapper: NewPropertyMapper(mappings),
 	}
 }
 
@@ -420,49 +429,7 @@ func (t *ReverseTransformer) iconToCalloutType(icon string) string {
 }
 
 // propertiesToFrontmatter converts Notion properties to frontmatter map.
+// Uses configured property mappings for reverse mapping (Notion -> Obsidian).
 func (t *ReverseTransformer) propertiesToFrontmatter(props notionapi.Properties) map[string]any {
-	frontmatter := make(map[string]any)
-
-	for name, prop := range props {
-		switch p := prop.(type) {
-		case *notionapi.TitleProperty:
-			if len(p.Title) > 0 {
-				frontmatter["title"] = p.Title[0].PlainText
-			}
-
-		case *notionapi.MultiSelectProperty:
-			var tags []string
-			for _, opt := range p.MultiSelect {
-				tags = append(tags, opt.Name)
-			}
-			if len(tags) > 0 {
-				frontmatter[strings.ToLower(name)] = tags
-			}
-
-		case *notionapi.SelectProperty:
-			if p.Select.Name != "" {
-				frontmatter[strings.ToLower(name)] = p.Select.Name
-			}
-
-		case *notionapi.DateProperty:
-			if p.Date != nil && p.Date.Start != nil {
-				frontmatter[strings.ToLower(name)] = p.Date.Start.String()
-			}
-
-		case *notionapi.CheckboxProperty:
-			frontmatter[strings.ToLower(name)] = p.Checkbox
-
-		case *notionapi.NumberProperty:
-			if p.Number != 0 {
-				frontmatter[strings.ToLower(name)] = p.Number
-			}
-
-		case *notionapi.RichTextProperty:
-			if len(p.RichText) > 0 {
-				frontmatter[strings.ToLower(name)] = p.RichText[0].PlainText
-			}
-		}
-	}
-
-	return frontmatter
+	return t.propertyMapper.ToFrontmatter(props)
 }

@@ -71,7 +71,6 @@ type watcher struct {
 	client       *notion.Client
 	linkRegistry *state.LinkRegistry
 	parser       *parser.Parser
-	transformer  *transformer.Transformer
 	scanner      *vault.Scanner
 
 	debounce     time.Duration
@@ -158,17 +157,11 @@ func runWatchForeground(cfg *config.Config, strategy ConflictStrategy, out io.Wr
 	linkRegistry := state.NewLinkRegistry(db)
 
 	w := &watcher{
-		cfg:          cfg,
-		db:           db,
-		client:       client,
-		linkRegistry: linkRegistry,
-		parser:       parser.New(),
-		transformer: transformer.New(linkRegistry, &transformer.Config{
-			UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-			CalloutIcons:        cfg.Transform.Callouts,
-			DataviewHandling:    cfg.Transform.Dataview,
-			FlattenHeadings:     true,
-		}),
+		cfg:            cfg,
+		db:             db,
+		client:         client,
+		linkRegistry:   linkRegistry,
+		parser:         parser.New(),
 		scanner:        vault.NewScanner(cfg.Vault, cfg.Sync.Ignore),
 		debounce:       debounce,
 		pollInterval:   pollInterval,
@@ -426,8 +419,9 @@ func (w *watcher) syncFile(ctx context.Context, relPath string) error {
 		_ = w.linkRegistry.RegisterLinks(relPath, targets)
 	}
 
-	// Transform to Notion.
-	notionPage, err := w.transformer.Transform(note)
+	// Transform to Notion with path-specific property mappings.
+	t := transformer.New(w.linkRegistry, buildTransformerConfig(w.cfg, relPath))
+	notionPage, err := t.Transform(note)
 	if err != nil {
 		return fmt.Errorf("transform: %w", err)
 	}
@@ -592,12 +586,7 @@ func (w *watcher) pollNotion() {
 
 // pullFile pulls a file from Notion.
 func (w *watcher) pullFile(ctx context.Context, relPath, pageID string) error {
-	reverseTransformer := transformer.NewReverse(w.linkRegistry, &transformer.Config{
-		UnresolvedLinkStyle: w.cfg.Transform.UnresolvedLinks,
-		CalloutIcons:        w.cfg.Transform.Callouts,
-		DataviewHandling:    w.cfg.Transform.Dataview,
-		FlattenHeadings:     true,
-	})
+	rt := transformer.NewReverse(w.linkRegistry, buildTransformerConfig(w.cfg, relPath))
 
 	// Fetch page from Notion.
 	notionPage, err := w.client.FetchPage(ctx, pageID)
@@ -606,7 +595,7 @@ func (w *watcher) pullFile(ctx context.Context, relPath, pageID string) error {
 	}
 
 	// Transform to markdown.
-	markdown, err := reverseTransformer.NotionToMarkdown(notionPage)
+	markdown, err := rt.NotionToMarkdown(notionPage)
 	if err != nil {
 		return fmt.Errorf("transform to markdown: %w", err)
 	}

@@ -41,7 +41,15 @@ type PropertyMapping struct {
 }
 
 // DefaultMappings provides sensible defaults for common frontmatter fields.
+// These are used when no explicit PropertyMappings are configured.
 var DefaultMappings = []PropertyMapping{
+	{ObsidianKey: "title", NotionName: "Name", NotionType: PropertyTypeTitle},
+	{ObsidianKey: "tags", NotionName: "Tags", NotionType: PropertyTypeMultiSelect},
+}
+
+// BuiltInMappings provides sensible defaults for additional common frontmatter fields.
+// These can be used as a starting point for custom configurations.
+var BuiltInMappings = []PropertyMapping{
 	{ObsidianKey: "title", NotionName: "Name", NotionType: PropertyTypeTitle},
 	{ObsidianKey: "tags", NotionName: "Tags", NotionType: PropertyTypeMultiSelect},
 	{ObsidianKey: "status", NotionName: "Status", NotionType: PropertyTypeSelect},
@@ -100,10 +108,13 @@ func (m *PropertyMapper) ToNotionProperties(frontmatter map[string]any, tags []s
 }
 
 // ToFrontmatter converts Notion properties to frontmatter.
+// It first processes explicitly mapped properties, then adds unmapped properties
+// with lowercase Notion property names as frontmatter keys.
 func (m *PropertyMapper) ToFrontmatter(props notionapi.Properties) map[string]any {
 	frontmatter := make(map[string]any)
+	processed := make(map[string]bool)
 
-	// Reverse mapping.
+	// First pass: process explicitly mapped properties.
 	for _, mapping := range m.mappings {
 		prop, exists := props[mapping.NotionName]
 		if !exists {
@@ -114,9 +125,128 @@ func (m *PropertyMapper) ToFrontmatter(props notionapi.Properties) map[string]an
 		if value != nil {
 			frontmatter[mapping.ObsidianKey] = value
 		}
+		processed[mapping.NotionName] = true
+	}
+
+	// Second pass: add unmapped properties with lowercase names.
+	for name, prop := range props {
+		if processed[name] {
+			continue
+		}
+
+		// Infer type and extract value.
+		value := m.extractPropertyValueAuto(prop)
+		if value != nil {
+			// Use lowercase of Notion property name as frontmatter key.
+			frontmatter[strings.ToLower(name)] = value
+		}
 	}
 
 	return frontmatter
+}
+
+// extractPropertyValueAuto extracts a Go value from a Notion property
+// by auto-detecting the property type. Handles both pointer and value types.
+func (m *PropertyMapper) extractPropertyValueAuto(prop notionapi.Property) any {
+	switch p := prop.(type) {
+	// Pointer types (from Notion API responses).
+	case *notionapi.TitleProperty:
+		if len(p.Title) > 0 {
+			return p.Title[0].PlainText
+		}
+	case *notionapi.RichTextProperty:
+		if len(p.RichText) > 0 {
+			return p.RichText[0].PlainText
+		}
+	case *notionapi.NumberProperty:
+		return p.Number
+	case *notionapi.SelectProperty:
+		if p.Select.Name != "" {
+			return p.Select.Name
+		}
+	case *notionapi.MultiSelectProperty:
+		var values []string
+		for _, opt := range p.MultiSelect {
+			values = append(values, opt.Name)
+		}
+		if len(values) > 0 {
+			return values
+		}
+	case *notionapi.DateProperty:
+		if p.Date != nil && p.Date.Start != nil {
+			return p.Date.Start.String()
+		}
+	case *notionapi.CheckboxProperty:
+		return p.Checkbox
+	case *notionapi.URLProperty:
+		if p.URL != "" {
+			return p.URL
+		}
+	case *notionapi.EmailProperty:
+		if p.Email != "" {
+			return p.Email
+		}
+	case *notionapi.PhoneNumberProperty:
+		if p.PhoneNumber != "" {
+			return p.PhoneNumber
+		}
+
+	// Value types (from our ToNotionProperties function).
+	case notionapi.TitleProperty:
+		if len(p.Title) > 0 {
+			// Check PlainText first (from API), then Text.Content (locally created).
+			if p.Title[0].PlainText != "" {
+				return p.Title[0].PlainText
+			}
+			if p.Title[0].Text != nil {
+				return p.Title[0].Text.Content
+			}
+		}
+	case notionapi.RichTextProperty:
+		if len(p.RichText) > 0 {
+			// Check PlainText first (from API), then Text.Content (locally created).
+			if p.RichText[0].PlainText != "" {
+				return p.RichText[0].PlainText
+			}
+			if p.RichText[0].Text != nil {
+				return p.RichText[0].Text.Content
+			}
+		}
+	case notionapi.NumberProperty:
+		return p.Number
+	case notionapi.SelectProperty:
+		if p.Select.Name != "" {
+			return p.Select.Name
+		}
+	case notionapi.MultiSelectProperty:
+		var values []string
+		for _, opt := range p.MultiSelect {
+			values = append(values, opt.Name)
+		}
+		if len(values) > 0 {
+			return values
+		}
+	case notionapi.DateProperty:
+		if p.Date != nil && p.Date.Start != nil {
+			return p.Date.Start.String()
+		}
+	case notionapi.CheckboxProperty:
+		return p.Checkbox
+	case notionapi.URLProperty:
+		if p.URL != "" {
+			return p.URL
+		}
+	case notionapi.EmailProperty:
+		if p.Email != "" {
+			return p.Email
+		}
+	case notionapi.PhoneNumberProperty:
+		if p.PhoneNumber != "" {
+			return p.PhoneNumber
+		}
+	}
+
+	return nil
 }
 
 // convertToProperty converts a Go value to a Notion property.
@@ -138,6 +268,10 @@ func (m *PropertyMapper) convertToProperty(value any, propType PropertyType) not
 		return m.toCheckboxProperty(value)
 	case PropertyTypeURL:
 		return m.toURLProperty(value)
+	case PropertyTypeEmail:
+		return m.toEmailProperty(value)
+	case PropertyTypePhone:
+		return m.toPhoneProperty(value)
 	default:
 		return nil
 	}
@@ -260,9 +394,21 @@ func (m *PropertyMapper) toURLProperty(value any) notionapi.Property {
 	return notionapi.URLProperty{URL: url}
 }
 
+func (m *PropertyMapper) toEmailProperty(value any) notionapi.Property {
+	email := toString(value)
+	return notionapi.EmailProperty{Email: email}
+}
+
+func (m *PropertyMapper) toPhoneProperty(value any) notionapi.Property {
+	phone := toString(value)
+	return notionapi.PhoneNumberProperty{PhoneNumber: phone}
+}
+
 // extractPropertyValue extracts a Go value from a Notion property.
+// Handles both pointer types (from Notion API) and value types (from ToNotionProperties).
 func (m *PropertyMapper) extractPropertyValue(prop notionapi.Property, propType PropertyType) any {
 	switch p := prop.(type) {
+	// Pointer types (from Notion API responses).
 	case *notionapi.TitleProperty:
 		if len(p.Title) > 0 {
 			return p.Title[0].PlainText
@@ -289,6 +435,54 @@ func (m *PropertyMapper) extractPropertyValue(prop notionapi.Property, propType 
 		return p.Checkbox
 	case *notionapi.URLProperty:
 		return p.URL
+	case *notionapi.EmailProperty:
+		return p.Email
+	case *notionapi.PhoneNumberProperty:
+		return p.PhoneNumber
+
+	// Value types (from our ToNotionProperties function).
+	case notionapi.TitleProperty:
+		if len(p.Title) > 0 {
+			// Check PlainText first (from API), then Text.Content (locally created).
+			if p.Title[0].PlainText != "" {
+				return p.Title[0].PlainText
+			}
+			if p.Title[0].Text != nil {
+				return p.Title[0].Text.Content
+			}
+		}
+	case notionapi.RichTextProperty:
+		if len(p.RichText) > 0 {
+			// Check PlainText first (from API), then Text.Content (locally created).
+			if p.RichText[0].PlainText != "" {
+				return p.RichText[0].PlainText
+			}
+			if p.RichText[0].Text != nil {
+				return p.RichText[0].Text.Content
+			}
+		}
+	case notionapi.NumberProperty:
+		return p.Number
+	case notionapi.SelectProperty:
+		return p.Select.Name
+	case notionapi.MultiSelectProperty:
+		var values []string
+		for _, opt := range p.MultiSelect {
+			values = append(values, opt.Name)
+		}
+		return values
+	case notionapi.DateProperty:
+		if p.Date != nil && p.Date.Start != nil {
+			return p.Date.Start.String()
+		}
+	case notionapi.CheckboxProperty:
+		return p.Checkbox
+	case notionapi.URLProperty:
+		return p.URL
+	case notionapi.EmailProperty:
+		return p.Email
+	case notionapi.PhoneNumberProperty:
+		return p.PhoneNumber
 	}
 
 	return nil
@@ -328,4 +522,43 @@ func parseDate(s string) (time.Time, error) {
 	}
 
 	return time.Time{}, fmt.Errorf("unable to parse date: %s", s)
+}
+
+// PropertyMappingFromConfig converts a config type string to PropertyType.
+func PropertyMappingFromConfig(obsidian, notion, typeStr string) PropertyMapping {
+	return PropertyMapping{
+		ObsidianKey: obsidian,
+		NotionName:  notion,
+		NotionType:  PropertyTypeFromString(typeStr),
+	}
+}
+
+// PropertyTypeFromString converts a string to PropertyType.
+// Returns PropertyTypeRichText as default for unknown types.
+func PropertyTypeFromString(s string) PropertyType {
+	switch s {
+	case "title":
+		return PropertyTypeTitle
+	case "rich_text":
+		return PropertyTypeRichText
+	case "number":
+		return PropertyTypeNumber
+	case "select":
+		return PropertyTypeSelect
+	case "multi_select":
+		return PropertyTypeMultiSelect
+	case "date":
+		return PropertyTypeDate
+	case "checkbox":
+		return PropertyTypeCheckbox
+	case "url":
+		return PropertyTypeURL
+	case "email":
+		return PropertyTypeEmail
+	case "phone_number":
+		return PropertyTypePhone
+	default:
+		// Default to rich_text for unknown types.
+		return PropertyTypeRichText
+	}
 }

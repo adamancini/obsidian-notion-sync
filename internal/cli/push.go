@@ -182,13 +182,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 			client:       client,
 			linkRegistry: linkRegistry,
 			parser:       parser.New(),
-			transformer: transformer.New(linkRegistry, &transformer.Config{
-				UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-				CalloutIcons:        cfg.Transform.Callouts,
-				DataviewHandling:    cfg.Transform.Dataview,
-				FlattenHeadings:     true,
-			}),
-			scanner: vault.NewScanner(cfg.Vault, cfg.Sync.Ignore),
+			scanner:      vault.NewScanner(cfg.Vault, cfg.Sync.Ignore),
 		}
 
 		// Process files in parallel.
@@ -253,12 +247,7 @@ func runPush(cmd *cobra.Command, args []string) error {
 				continue
 			}
 
-			t := transformer.New(linkRegistry, &transformer.Config{
-				UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-				CalloutIcons:        cfg.Transform.Callouts,
-				DataviewHandling:    cfg.Transform.Dataview,
-				FlattenHeadings:     true,
-			})
+			t := transformer.New(linkRegistry, buildTransformerConfig(cfg, f.path))
 
 			notionPage, err := t.Transform(note)
 			if err != nil {
@@ -489,7 +478,6 @@ type pushContext struct {
 	client       *notion.Client
 	linkRegistry *state.LinkRegistry
 	parser       *parser.Parser
-	transformer  *transformer.Transformer
 	scanner      *vault.Scanner
 }
 
@@ -529,8 +517,11 @@ func (pc *pushContext) processFile(ctx context.Context, f pushFile) (pushResult,
 		}
 	}
 
+	// Create transformer with path-specific property mappings.
+	t := transformer.New(pc.linkRegistry, buildTransformerConfig(pc.cfg, f.path))
+
 	// Transform to Notion page structure.
-	notionPage, err := pc.transformer.Transform(note)
+	notionPage, err := t.Transform(note)
 	if err != nil {
 		return pushResult{}, fmt.Errorf("transform to Notion: %w", err)
 	}

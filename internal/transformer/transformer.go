@@ -25,8 +25,9 @@ type LinkResolver interface {
 
 // Transformer converts Obsidian parsed notes to Notion page structures.
 type Transformer struct {
-	linkResolver LinkResolver
-	config       *Config
+	linkResolver   LinkResolver
+	config         *Config
+	propertyMapper *PropertyMapper
 }
 
 // Config holds transformer configuration options.
@@ -44,6 +45,10 @@ type Config struct {
 
 	// FlattenHeadings flattens H4-H6 to H3 (Notion only supports H1-H3).
 	FlattenHeadings bool
+
+	// PropertyMappings defines how frontmatter fields map to Notion properties.
+	// If nil or empty, uses DefaultMappings.
+	PropertyMappings []PropertyMapping
 }
 
 // NotionPage represents a page ready to be created in Notion.
@@ -60,9 +65,17 @@ func New(resolver LinkResolver, cfg *Config) *Transformer {
 	if cfg == nil {
 		cfg = DefaultConfig()
 	}
+
+	// Create property mapper from config or use defaults.
+	var mappings []PropertyMapping
+	if len(cfg.PropertyMappings) > 0 {
+		mappings = cfg.PropertyMappings
+	}
+
 	return &Transformer{
-		linkResolver: resolver,
-		config:       cfg,
+		linkResolver:   resolver,
+		config:         cfg,
+		propertyMapper: NewPropertyMapper(mappings),
 	}
 }
 
@@ -196,36 +209,7 @@ func (t *Transformer) transformNode(n ast.Node, source []byte) (notionapi.Block,
 
 // transformProperties converts frontmatter and tags to Notion properties.
 func (t *Transformer) transformProperties(frontmatter map[string]any, tags []string) notionapi.Properties {
-	props := make(notionapi.Properties)
-
-	// TODO: Implement property transformation using mappings.
-	// This should use the PropertyMapping configuration to convert
-	// frontmatter fields to Notion property types.
-
-	// Handle title property.
-	if title, ok := frontmatter["title"].(string); ok {
-		props["Name"] = notionapi.TitleProperty{
-			Title: []notionapi.RichText{
-				{
-					Type: notionapi.ObjectTypeText,
-					Text: &notionapi.Text{Content: title},
-				},
-			},
-		}
-	}
-
-	// Handle tags as multi-select.
-	if len(tags) > 0 {
-		options := make([]notionapi.Option, len(tags))
-		for i, tag := range tags {
-			options[i] = notionapi.Option{Name: tag}
-		}
-		props["Tags"] = notionapi.MultiSelectProperty{
-			MultiSelect: options,
-		}
-	}
-
-	return props
+	return t.propertyMapper.ToNotionProperties(frontmatter, tags)
 }
 
 // transformExtensionNode handles goldmark extension node types.

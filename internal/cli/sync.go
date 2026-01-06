@@ -260,13 +260,7 @@ func runSync(cmd *cobra.Command, args []string) error {
 			client:       client,
 			linkRegistry: linkRegistry,
 			parser:       parser.New(),
-			transformer: transformer.New(linkRegistry, &transformer.Config{
-				UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-				CalloutIcons:        cfg.Transform.Callouts,
-				DataviewHandling:    cfg.Transform.Dataview,
-				FlattenHeadings:     true,
-			}),
-			scanner: vault.NewScanner(cfg.Vault, cfg.Sync.Ignore),
+			scanner:      vault.NewScanner(cfg.Vault, cfg.Sync.Ignore),
 		}
 
 		results := osync.ProcessWithProgress(ctx, pool, pushChanges, pushCtx.processChange, progress.SimpleCallback())
@@ -303,12 +297,6 @@ func runSync(cmd *cobra.Command, args []string) error {
 			db:           db,
 			client:       client,
 			linkRegistry: linkRegistry,
-			transformer: transformer.NewReverse(linkRegistry, &transformer.Config{
-				UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-				CalloutIcons:        cfg.Transform.Callouts,
-				DataviewHandling:    cfg.Transform.Dataview,
-				FlattenHeadings:     true,
-			}),
 		}
 
 		results := osync.ProcessWithProgress(ctx, pool, pullChanges, pullCtx.processChange, progress.SimpleCallback())
@@ -349,7 +337,6 @@ type syncPushContext struct {
 	client       *notion.Client
 	linkRegistry *state.LinkRegistry
 	parser       *parser.Parser
-	transformer  *transformer.Transformer
 	scanner      *vault.Scanner
 }
 
@@ -414,7 +401,9 @@ func (pc *syncPushContext) processChange(ctx context.Context, c state.Change) (s
 		_ = pc.linkRegistry.RegisterLinks(c.Path, targets)
 	}
 
-	notionPage, err := pc.transformer.Transform(note)
+	// Create transformer with path-specific property mappings.
+	t := transformer.New(pc.linkRegistry, buildTransformerConfig(pc.cfg, c.Path))
+	notionPage, err := t.Transform(note)
 	if err != nil {
 		return struct{}{}, fmt.Errorf("transform to Notion: %w", err)
 	}
@@ -471,7 +460,6 @@ type syncPullContext struct {
 	db           *state.DB
 	client       *notion.Client
 	linkRegistry *state.LinkRegistry
-	transformer  *transformer.ReverseTransformer
 }
 
 // processChange processes a single change for pull.
@@ -486,8 +474,11 @@ func (pc *syncPullContext) processChange(ctx context.Context, c state.Change) (s
 		return struct{}{}, fmt.Errorf("fetch page: %w", err)
 	}
 
+	// Create reverse transformer with path-specific property mappings.
+	rt := transformer.NewReverse(pc.linkRegistry, buildTransformerConfig(pc.cfg, c.Path))
+
 	// Transform to markdown.
-	markdown, err := pc.transformer.NotionToMarkdown(notionPage)
+	markdown, err := rt.NotionToMarkdown(notionPage)
 	if err != nil {
 		return struct{}{}, fmt.Errorf("transform to markdown: %w", err)
 	}

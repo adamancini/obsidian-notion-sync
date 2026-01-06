@@ -162,12 +162,6 @@ func runPull(cmd *cobra.Command, args []string) error {
 			db:           db,
 			client:       client,
 			linkRegistry: linkRegistry,
-			transformer: transformer.NewReverse(linkRegistry, &transformer.Config{
-				UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-				CalloutIcons:        cfg.Transform.Callouts,
-				DataviewHandling:    cfg.Transform.Dataview,
-				FlattenHeadings:     true,
-			}),
 		}
 
 		// Process pages in parallel.
@@ -439,7 +433,6 @@ type pullContext struct {
 	db           *state.DB
 	client       *notion.Client
 	linkRegistry *state.LinkRegistry
-	transformer  *transformer.ReverseTransformer
 }
 
 // pullResult holds the result of processing a single page.
@@ -455,8 +448,11 @@ func (pc *pullContext) processPage(ctx context.Context, p pullPage) (pullResult,
 		return pullResult{}, fmt.Errorf("fetch page: %w", err)
 	}
 
+	// Create reverse transformer with path-specific property mappings.
+	rt := transformer.NewReverse(pc.linkRegistry, buildTransformerConfig(pc.cfg, p.localPath))
+
 	// Transform to markdown.
-	markdown, err := pc.transformer.NotionToMarkdown(notionPage)
+	markdown, err := rt.NotionToMarkdown(notionPage)
 	if err != nil {
 		return pullResult{}, fmt.Errorf("transform to markdown: %w", err)
 	}

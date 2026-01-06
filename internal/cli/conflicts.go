@@ -215,12 +215,7 @@ func resolveKeepLocal(ctx context.Context, cfg *config.Config, db *state.DB, cli
 		return "", fmt.Errorf("parse markdown: %w", err)
 	}
 
-	t := transformer.New(linkRegistry, &transformer.Config{
-		UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-		CalloutIcons:        cfg.Transform.Callouts,
-		DataviewHandling:    cfg.Transform.Dataview,
-		FlattenHeadings:     true,
-	})
+	t := transformer.New(linkRegistry, buildTransformerConfig(cfg, path))
 
 	notionPage, err := t.Transform(note)
 	if err != nil {
@@ -250,12 +245,7 @@ func resolveKeepRemote(ctx context.Context, cfg *config.Config, db *state.DB, cl
 	}
 
 	// Transform to markdown.
-	rt := transformer.NewReverse(linkRegistry, &transformer.Config{
-		UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-		CalloutIcons:        cfg.Transform.Callouts,
-		DataviewHandling:    cfg.Transform.Dataview,
-		FlattenHeadings:     true,
-	})
+	rt := transformer.NewReverse(linkRegistry, buildTransformerConfig(cfg, path))
 
 	markdown, err := rt.NotionToMarkdown(notionPage)
 	if err != nil {
@@ -286,12 +276,7 @@ func resolveKeepBoth(ctx context.Context, cfg *config.Config, db *state.DB, clie
 	}
 
 	// Transform to markdown.
-	rt := transformer.NewReverse(linkRegistry, &transformer.Config{
-		UnresolvedLinkStyle: cfg.Transform.UnresolvedLinks,
-		CalloutIcons:        cfg.Transform.Callouts,
-		DataviewHandling:    cfg.Transform.Dataview,
-		FlattenHeadings:     true,
-	})
+	rt := transformer.NewReverse(linkRegistry, buildTransformerConfig(cfg, path))
 
 	markdown, err := rt.NotionToMarkdown(notionPage)
 	if err != nil {

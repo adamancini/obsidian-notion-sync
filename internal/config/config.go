@@ -92,6 +92,10 @@ type TransformConfig struct {
 
 	// UnresolvedLinks handling: "placeholder", "text", or "skip".
 	UnresolvedLinks string `yaml:"unresolved_links"`
+
+	// PropertyMappings defines how frontmatter fields map to Notion properties.
+	// If empty, uses default mappings (title->Name, tags->Tags).
+	PropertyMappings []PropertyMappingConfig `yaml:"property_mappings"`
 }
 
 // SyncConfig holds synchronization behavior settings.
@@ -315,6 +319,11 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate global property mappings.
+	if err := validatePropertyMappings(c.Transform.PropertyMappings, "transform.property_mappings"); err != nil {
+		return err
+	}
+
 	// Validate rate limit settings.
 	if c.RateLimit.RequestsPerSecond < 0 {
 		return fmt.Errorf("rate_limit.requests_per_second must be non-negative")
@@ -334,26 +343,35 @@ func (c *Config) Validate() error {
 		if mapping.Database == "" {
 			return fmt.Errorf("mappings[%d].database is required", i)
 		}
-		for j, prop := range mapping.Properties {
-			if prop.Obsidian == "" {
-				return fmt.Errorf("mappings[%d].properties[%d].obsidian is required", i, j)
-			}
-			if prop.Notion == "" {
-				return fmt.Errorf("mappings[%d].properties[%d].notion is required", i, j)
-			}
-			if prop.Type != "" {
-				validTypes := map[string]bool{
-					"title": true, "rich_text": true, "number": true, "select": true,
-					"multi_select": true, "date": true, "checkbox": true, "url": true,
-					"email": true, "phone_number": true, "relation": true, "files": true,
-				}
-				if !validTypes[prop.Type] {
-					return fmt.Errorf("mappings[%d].properties[%d].type is invalid: %s", i, j, prop.Type)
-				}
-			}
+		prefix := fmt.Sprintf("mappings[%d].properties", i)
+		if err := validatePropertyMappings(mapping.Properties, prefix); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// validatePropertyMappings validates a slice of property mappings.
+// prefix is used for error message context (e.g., "transform.property_mappings" or "mappings[0].properties").
+func validatePropertyMappings(mappings []PropertyMappingConfig, prefix string) error {
+	validTypes := map[string]bool{
+		"title": true, "rich_text": true, "number": true, "select": true,
+		"multi_select": true, "date": true, "checkbox": true, "url": true,
+		"email": true, "phone_number": true,
+	}
+
+	for i, prop := range mappings {
+		if prop.Obsidian == "" {
+			return fmt.Errorf("%s[%d].obsidian is required", prefix, i)
+		}
+		if prop.Notion == "" {
+			return fmt.Errorf("%s[%d].notion is required", prefix, i)
+		}
+		if prop.Type != "" && !validTypes[prop.Type] {
+			return fmt.Errorf("%s[%d].type is invalid: %s (valid types: title, rich_text, number, select, multi_select, date, checkbox, url, email, phone_number)", prefix, i, prop.Type)
+		}
+	}
 	return nil
 }
 
@@ -395,4 +413,39 @@ func (c *Config) GetDatabaseForPath(path string) string {
 		return mapping.Database
 	}
 	return c.Notion.DefaultDatabase
+}
+
+// GetPropertyMappingsForPath returns the property mappings for a given path.
+// It merges global transform.property_mappings with folder-specific mappings.
+// Folder-specific mappings override global mappings for the same Obsidian key.
+func (c *Config) GetPropertyMappingsForPath(path string) []PropertyMappingConfig {
+	// Start with global mappings.
+	result := make([]PropertyMappingConfig, len(c.Transform.PropertyMappings))
+	copy(result, c.Transform.PropertyMappings)
+
+	// Check for folder-specific mappings.
+	mapping := c.GetMapping(path)
+	if mapping == nil || len(mapping.Properties) == 0 {
+		return result
+	}
+
+	// Build a map for quick lookup of existing mappings by Obsidian key.
+	existing := make(map[string]int)
+	for i, m := range result {
+		existing[m.Obsidian] = i
+	}
+
+	// Merge folder-specific mappings (override or append).
+	for _, folderMapping := range mapping.Properties {
+		if idx, found := existing[folderMapping.Obsidian]; found {
+			// Override existing mapping.
+			result[idx] = folderMapping
+		} else {
+			// Append new mapping.
+			result = append(result, folderMapping)
+			existing[folderMapping.Obsidian] = len(result) - 1
+		}
+	}
+
+	return result
 }
