@@ -1,4 +1,5 @@
 ---
+# CI workflow for obsidian-notion-sync
 name: CI
 
 # yamllint disable-line rule:truthy
