@@ -98,9 +98,6 @@ func (c *Client) UpdateBlock(ctx context.Context, blockID string, block notionap
 
 // hasChildren checks if a block has child blocks.
 func hasChildren(block notionapi.Block) bool {
-	// TODO: Check HasChildren field on each block type.
-	// This requires type assertions for each block type.
-
 	switch b := block.(type) {
 	case *notionapi.ParagraphBlock:
 		return b.HasChildren

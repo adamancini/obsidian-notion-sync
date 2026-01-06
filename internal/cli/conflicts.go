@@ -18,7 +18,6 @@ import (
 )
 
 var (
-	resolvePath   string
 	resolveKeep   string
 	conflictsJson bool
 )

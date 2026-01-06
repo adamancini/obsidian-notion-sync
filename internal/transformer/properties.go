@@ -262,9 +262,6 @@ func (m *PropertyMapper) toURLProperty(value any) notionapi.Property {
 
 // extractPropertyValue extracts a Go value from a Notion property.
 func (m *PropertyMapper) extractPropertyValue(prop notionapi.Property, propType PropertyType) any {
-	// TODO: Implement property extraction for reverse transformation
-	// This is the inverse of convertToProperty
-
 	switch p := prop.(type) {
 	case *notionapi.TitleProperty:
 		if len(p.Title) > 0 {

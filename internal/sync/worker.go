@@ -9,7 +9,6 @@ import (
 // WorkerPool manages a pool of workers for parallel task execution.
 type WorkerPool struct {
 	workers int
-	wg      sync.WaitGroup
 }
 
 // NewWorkerPool creates a new worker pool with the specified number of workers.

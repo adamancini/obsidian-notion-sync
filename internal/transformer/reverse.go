@@ -423,10 +423,6 @@ func (t *ReverseTransformer) iconToCalloutType(icon string) string {
 func (t *ReverseTransformer) propertiesToFrontmatter(props notionapi.Properties) map[string]any {
 	frontmatter := make(map[string]any)
 
-	// TODO: Implement property-to-frontmatter conversion
-	// This should reverse the PropertyMapping to convert Notion properties
-	// back to Obsidian frontmatter fields
-
 	for name, prop := range props {
 		switch p := prop.(type) {
 		case *notionapi.TitleProperty:

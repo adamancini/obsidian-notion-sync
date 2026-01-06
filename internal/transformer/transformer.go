@@ -135,10 +135,6 @@ func (t *Transformer) Transform(note *parser.ParsedNote) (*NotionPage, error) {
 // transformNode converts a goldmark AST node to a Notion block.
 // Returns the block and whether to skip children (already processed).
 func (t *Transformer) transformNode(n ast.Node, source []byte) (notionapi.Block, bool) {
-	// TODO: Implement node transformation
-	// This is the core transformation logic that maps each AST node type
-	// to the corresponding Notion block type.
-
 	switch node := n.(type) {
 	case *ast.Document:
 		// Document is the root, process children normally.
