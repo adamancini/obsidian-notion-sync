@@ -40,6 +40,9 @@ type Config struct {
 
 	// RateLimit configures API rate limiting.
 	RateLimit RateLimitConfig `yaml:"rate_limit"`
+
+	// Watch contains watch mode configuration.
+	Watch WatchConfig `yaml:"watch"`
 }
 
 // NotionConfig holds Notion API credentials and defaults.
@@ -106,6 +109,25 @@ type SyncConfig struct {
 	Ignore []string `yaml:"ignore"`
 }
 
+// WatchConfig holds watch mode configuration.
+type WatchConfig struct {
+	// Debounce is the duration to wait after a file change before syncing.
+	// Default: 5s. This prevents sync storms during rapid edits.
+	Debounce string `yaml:"debounce"`
+
+	// PollInterval is the interval for polling Notion for remote changes.
+	// Default: 5m. Set to 0 to disable polling.
+	PollInterval string `yaml:"poll_interval"`
+
+	// PIDFile is the path to the PID file for daemon mode.
+	// Default: $XDG_RUNTIME_DIR/obsidian-notion.pid or /tmp/obsidian-notion.pid
+	PIDFile string `yaml:"pid_file"`
+
+	// LogFile is the path to the log file for daemon mode.
+	// Default: stdout
+	LogFile string `yaml:"log_file"`
+}
+
 // RateLimitConfig holds rate limiting settings.
 type RateLimitConfig struct {
 	// RequestsPerSecond is the API request rate limit.
@@ -151,6 +173,10 @@ func DefaultConfig() *Config {
 			RequestsPerSecond: DefaultRequestsPerSecond,
 			BatchSize:         DefaultBatchSize,
 			Workers:           4,
+		},
+		Watch: WatchConfig{
+			Debounce:     "5s",
+			PollInterval: "5m",
 		},
 	}
 }

@@ -15,6 +15,7 @@ require (
 
 require (
 	github.com/forPelevin/gomoji v1.3.1 // indirect
+	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/litao91/goldmark-mathjax v0.0.0-20210217064022-a43cf739a50f // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
@@ -22,5 +23,6 @@ require (
 	github.com/yuin/goldmark-meta v1.1.0 // indirect
 	go.abhg.dev/goldmark/hashtag v0.4.0 // indirect
 	go.abhg.dev/goldmark/mermaid v0.5.0 // indirect
+	golang.org/x/sys v0.13.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
