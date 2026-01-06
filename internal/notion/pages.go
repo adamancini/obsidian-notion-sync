@@ -91,24 +91,36 @@ func (c *Client) CreatePageUnderPage(ctx context.Context, parentPageID string, p
 
 // UpdatePage updates an existing page's properties and replaces all blocks.
 func (c *Client) UpdatePage(ctx context.Context, pageID string, page *transformer.NotionPage) error {
-	// 1. Update properties.
+	// 1. Fetch existing page to determine parent type.
+	existingPage, err := c.GetPage(ctx, pageID)
+	if err != nil {
+		return fmt.Errorf("get existing page: %w", err)
+	}
+
+	// 2. Prepare properties - remap if page is under a parent page (not database).
+	props := page.Properties
+	if existingPage.Parent.Type == notionapi.ParentTypePageID {
+		props = remapTitlePropertyForPage(props)
+	}
+
+	// 3. Update properties.
 	if err := c.wait(ctx); err != nil {
 		return fmt.Errorf("rate limit: %w", err)
 	}
 
-	_, err := c.api.Page.Update(ctx, notionapi.PageID(pageID), &notionapi.PageUpdateRequest{
-		Properties: page.Properties,
+	_, err = c.api.Page.Update(ctx, notionapi.PageID(pageID), &notionapi.PageUpdateRequest{
+		Properties: props,
 	})
 	if err != nil {
 		return fmt.Errorf("update properties: %w", err)
 	}
 
-	// 2. Delete existing blocks.
+	// 4. Delete existing blocks.
 	if err := c.deleteAllBlocks(ctx, pageID); err != nil {
 		return fmt.Errorf("delete blocks: %w", err)
 	}
 
-	// 3. Append new blocks.
+	// 5. Append new blocks.
 	if err := c.appendBlocks(ctx, pageID, page.Children); err != nil {
 		return fmt.Errorf("append blocks: %w", err)
 	}
