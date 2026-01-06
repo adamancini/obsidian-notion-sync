@@ -322,3 +322,287 @@ func TestLinkRegistry_GetBacklinks(t *testing.T) {
 		t.Errorf("expected backlinks from note-a, note-b, note-c; got sources: %v", sources)
 	}
 }
+
+func TestParseTarget(t *testing.T) {
+	tests := []struct {
+		input    string
+		wantPage string
+		wantHead string
+		wantBlk  string
+	}{
+		{"Page", "Page", "", ""},
+		{"Page.md", "Page", "", ""},
+		{"Page#Heading", "Page", "Heading", ""},
+		{"Page#Heading with spaces", "Page", "Heading with spaces", ""},
+		{"Page^block-id", "Page", "", "block-id"},
+		{"Page#Heading^block-id", "Page", "Heading", "block-id"},
+		{"folder/Page#Section", "folder/Page", "Section", ""},
+		{"work/notes/Architecture.md#Overview", "work/notes/Architecture", "Overview", ""},
+	}
+
+	for _, tc := range tests {
+		page, heading, blockRef := parseTarget(tc.input)
+		if page != tc.wantPage {
+			t.Errorf("parseTarget(%q) page = %q; want %q", tc.input, page, tc.wantPage)
+		}
+		if heading != tc.wantHead {
+			t.Errorf("parseTarget(%q) heading = %q; want %q", tc.input, heading, tc.wantHead)
+		}
+		if blockRef != tc.wantBlk {
+			t.Errorf("parseTarget(%q) blockRef = %q; want %q", tc.input, blockRef, tc.wantBlk)
+		}
+	}
+}
+
+func TestLinkRegistry_ResolveExtended(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	registry := NewLinkRegistry(db)
+
+	// Create sync state for test notes.
+	err = db.SetState(&SyncState{
+		ObsidianPath: "ServiceClass Architecture.md",
+		NotionPageID: "page-service-class",
+		Status:       "synced",
+	})
+	if err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+
+	// Test exact match with heading anchor.
+	result := registry.ResolveExtended("ServiceClass Architecture#Overview", false)
+	if !result.Found {
+		t.Error("expected to resolve exact target")
+	}
+	if result.PageID != "page-service-class" {
+		t.Errorf("page ID = %q; want %q", result.PageID, "page-service-class")
+	}
+	if result.Heading != "Overview" {
+		t.Errorf("heading = %q; want %q", result.Heading, "Overview")
+	}
+	if result.FuzzyMatch {
+		t.Error("expected exact match, not fuzzy")
+	}
+
+	// Test fuzzy match with typo.
+	result = registry.ResolveExtended("SrviceClass Architecture", true)
+	if !result.Found {
+		t.Error("expected to resolve fuzzy target")
+	}
+	if !result.FuzzyMatch {
+		t.Error("expected fuzzy match flag to be true")
+	}
+
+	// Test unresolved without fuzzy.
+	result = registry.ResolveExtended("SrviceClass Architecture", false)
+	if result.Found {
+		t.Error("expected NOT to resolve without fuzzy matching")
+	}
+}
+
+func TestLinkRegistry_GetSuggestions(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	registry := NewLinkRegistry(db)
+
+	// Set up some synced notes.
+	for _, note := range []struct {
+		path, pageID string
+	}{
+		{"Architecture.md", "page-arch"},
+		{"ServiceClass.md", "page-svc"},
+		{"Configuration.md", "page-cfg"},
+	} {
+		err = db.SetState(&SyncState{
+			ObsidianPath: note.path,
+			NotionPageID: note.pageID,
+			Status:       "synced",
+		})
+		if err != nil {
+			t.Fatalf("set state: %v", err)
+		}
+	}
+
+	// Register an unresolved link with a typo.
+	err = registry.RegisterLinks("index.md", []string{"Architcture", "ServiceClas"})
+	if err != nil {
+		t.Fatalf("register links: %v", err)
+	}
+
+	// Get suggestions.
+	suggestions, err := registry.GetSuggestionsForUnresolved(3)
+	if err != nil {
+		t.Fatalf("get suggestions: %v", err)
+	}
+
+	if len(suggestions) != 2 {
+		t.Fatalf("expected 2 suggestions, got %d", len(suggestions))
+	}
+
+	// Verify suggestions are reasonable.
+	foundArch := false
+	foundSvc := false
+	for _, s := range suggestions {
+		if s.Target == "Architcture" && len(s.Suggestions) > 0 {
+			if s.Suggestions[0].Path == "Architecture.md" {
+				foundArch = true
+			}
+		}
+		if s.Target == "ServiceClas" && len(s.Suggestions) > 0 {
+			if s.Suggestions[0].Path == "ServiceClass.md" {
+				foundSvc = true
+			}
+		}
+	}
+
+	if !foundArch {
+		t.Error("expected 'Architecture.md' as suggestion for 'Architcture'")
+	}
+	if !foundSvc {
+		t.Error("expected 'ServiceClass.md' as suggestion for 'ServiceClas'")
+	}
+}
+
+func TestLinkRegistry_RepairLinks(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	registry := NewLinkRegistry(db)
+
+	// Set up synced note.
+	err = db.SetState(&SyncState{
+		ObsidianPath: "MyNote.md",
+		NotionPageID: "page-mynote",
+		Status:       "synced",
+	})
+	if err != nil {
+		t.Fatalf("set state: %v", err)
+	}
+
+	// Register unresolved link with typo.
+	err = registry.RegisterLinks("source.md", []string{"MyNot"})
+	if err != nil {
+		t.Fatalf("register links: %v", err)
+	}
+
+	// Dry run should show what would be repaired.
+	results, err := registry.RepairLinks(true)
+	if err != nil {
+		t.Fatalf("repair links dry run: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 repair result, got %d", len(results))
+	}
+	if !results[0].WouldRepair {
+		t.Error("expected WouldRepair to be true")
+	}
+	if results[0].WasRepaired {
+		t.Error("expected WasRepaired to be false in dry run")
+	}
+
+	// Verify still unresolved.
+	unresolved, _ := registry.GetUnresolvedLinks()
+	if len(unresolved) != 1 {
+		t.Errorf("expected 1 unresolved after dry run, got %d", len(unresolved))
+	}
+
+	// Actual repair.
+	results, err = registry.RepairLinks(false)
+	if err != nil {
+		t.Fatalf("repair links: %v", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 repair result, got %d", len(results))
+	}
+	if !results[0].WasRepaired {
+		t.Error("expected WasRepaired to be true")
+	}
+
+	// Now should be resolved.
+	unresolved, _ = registry.GetUnresolvedLinks()
+	if len(unresolved) != 0 {
+		t.Errorf("expected 0 unresolved after repair, got %d", len(unresolved))
+	}
+}
+
+func TestLinkRegistry_GetStats(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "obsidian-test-*")
+	if err != nil {
+		t.Fatalf("create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "test.db")
+	db, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	registry := NewLinkRegistry(db)
+
+	// Register some links.
+	err = registry.RegisterLinks("note-a.md", []string{"Target1", "Target2", "Target3"})
+	if err != nil {
+		t.Fatalf("register links: %v", err)
+	}
+	err = registry.RegisterLinks("note-b.md", []string{"Target4"})
+	if err != nil {
+		t.Fatalf("register links: %v", err)
+	}
+
+	stats, err := registry.GetStats()
+	if err != nil {
+		t.Fatalf("get stats: %v", err)
+	}
+
+	if stats.Total != 4 {
+		t.Errorf("total = %d; want 4", stats.Total)
+	}
+	if stats.Resolved != 0 {
+		t.Errorf("resolved = %d; want 0", stats.Resolved)
+	}
+	if stats.Unresolved != 4 {
+		t.Errorf("unresolved = %d; want 4", stats.Unresolved)
+	}
+	if stats.BySource["note-a.md"] != 3 {
+		t.Errorf("bySource[note-a.md] = %d; want 3", stats.BySource["note-a.md"])
+	}
+	if stats.BySource["note-b.md"] != 1 {
+		t.Errorf("bySource[note-b.md] = %d; want 1", stats.BySource["note-b.md"])
+	}
+}

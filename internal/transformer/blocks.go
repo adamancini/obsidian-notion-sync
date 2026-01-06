@@ -1,6 +1,7 @@
 package transformer
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -58,6 +59,139 @@ func (t *Transformer) transformParagraph(p *ast.Paragraph, source []byte) notion
 		},
 		Paragraph: notionapi.Paragraph{
 			RichText: richText,
+		},
+	}
+}
+
+// tryImageBlock checks if a paragraph contains only an image and returns an ImageBlock.
+// Returns nil if the paragraph is not a standalone image.
+func (t *Transformer) tryImageBlock(p *ast.Paragraph, source []byte) notionapi.Block {
+	// Count children - we want exactly one image.
+	var imageNode *ast.Image
+	childCount := 0
+
+	for child := p.FirstChild(); child != nil; child = child.NextSibling() {
+		childCount++
+		if img, ok := child.(*ast.Image); ok {
+			imageNode = img
+		} else if txt, ok := child.(*ast.Text); ok {
+			// Allow whitespace-only text nodes.
+			content := strings.TrimSpace(string(txt.Segment.Value(source)))
+			if content != "" {
+				return nil // Non-whitespace text, not a standalone image.
+			}
+			childCount-- // Don't count whitespace.
+		}
+	}
+
+	if imageNode == nil || childCount != 1 {
+		return nil
+	}
+
+	return t.transformImage(imageNode, source)
+}
+
+// transformImage converts an ast.Image to a Notion image block.
+func (t *Transformer) transformImage(img *ast.Image, source []byte) notionapi.Block {
+	url := string(img.Destination)
+	alt := string(img.Text(source))
+
+	// Check if this is a local file path.
+	if isLocalPath(url) {
+		// For local images without upload support, create a placeholder callout.
+		return t.createImagePlaceholder(url, alt, "local")
+	}
+
+	// External image - create an ImageBlock.
+	var caption []notionapi.RichText
+	if alt != "" {
+		caption = []notionapi.RichText{
+			{
+				Type: notionapi.ObjectTypeText,
+				Text: &notionapi.Text{Content: alt},
+			},
+		}
+	}
+
+	return &notionapi.ImageBlock{
+		BasicBlock: notionapi.BasicBlock{
+			Object: notionapi.ObjectTypeBlock,
+			Type:   notionapi.BlockTypeImage,
+		},
+		Image: notionapi.Image{
+			Type: "external",
+			External: &notionapi.FileObject{
+				URL: url,
+			},
+			Caption: caption,
+		},
+	}
+}
+
+// isLocalPath checks if a URL is a local file path.
+func isLocalPath(url string) bool {
+	// Data URLs are inline embedded content, not local files.
+	if strings.HasPrefix(url, "data:") {
+		return false
+	}
+	// file:// protocol.
+	if strings.HasPrefix(url, "file://") {
+		return true
+	}
+	// Relative paths (no protocol).
+	if !strings.Contains(url, "://") {
+		return true
+	}
+	return false
+}
+
+// createImagePlaceholder creates a callout placeholder for images that can't be embedded.
+func (t *Transformer) createImagePlaceholder(path, alt, reason string) notionapi.Block {
+	var title, body string
+	switch reason {
+	case "local":
+		title = "Local Image"
+		body = "Local image cannot be embedded without upload support."
+	case "wikilink":
+		title = "Wiki-link Image"
+		body = "Wiki-link image reference."
+	default:
+		title = "Image"
+		body = "Image cannot be embedded."
+	}
+
+	displayText := path
+	if alt != "" {
+		displayText = fmt.Sprintf("%s (%s)", alt, path)
+	}
+
+	richText := []notionapi.RichText{
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: title},
+			Annotations: &notionapi.Annotations{Bold: true},
+		},
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: "\n" + body + "\n"},
+		},
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: displayText},
+			Annotations: &notionapi.Annotations{Code: true},
+		},
+	}
+
+	emoji := notionapi.Emoji("🖼️")
+	return &notionapi.CalloutBlock{
+		BasicBlock: notionapi.BasicBlock{
+			Object: notionapi.ObjectTypeBlock,
+			Type:   "callout",
+		},
+		Callout: notionapi.Callout{
+			RichText: richText,
+			Icon:     &notionapi.Icon{Type: "emoji", Emoji: &emoji},
+			Color:    "gray_background",
 		},
 	}
 }
@@ -429,6 +563,74 @@ func (t *Transformer) transformEquation(expression string) notionapi.Block {
 		},
 		Equation: notionapi.Equation{
 			Expression: expression,
+		},
+	}
+}
+
+// transformDataviewBlock converts a dataview code block to a Notion callout placeholder.
+// Since Notion cannot execute dataview queries, we create an informational callout
+// that preserves the original query for reference.
+func (t *Transformer) transformDataviewBlock(cb *ast.FencedCodeBlock, source []byte) notionapi.Block {
+	// Get language to distinguish dataview vs dataviewjs.
+	lang := string(cb.Language(source))
+	isJS := lang == "dataviewjs"
+
+	// Get query content.
+	var content strings.Builder
+	lines := cb.Lines()
+	for i := 0; i < lines.Len(); i++ {
+		line := lines.At(i)
+		content.Write(line.Value(source))
+	}
+	query := strings.TrimSuffix(content.String(), "\n")
+
+	// Build the callout content.
+	var titleText, bodyText string
+	if isJS {
+		titleText = "Dataview JS Query"
+		bodyText = "This JavaScript query requires Obsidian to execute:"
+	} else {
+		titleText = "Dataview Query"
+		bodyText = "This query requires Obsidian to execute:"
+	}
+
+	// Create rich text content: title (bold) + newline + description + newline + query (code).
+	richText := []notionapi.RichText{
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: titleText},
+			Annotations: &notionapi.Annotations{
+				Bold: true,
+			},
+		},
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: "\n" + bodyText + "\n\n"},
+		},
+		{
+			Type: notionapi.ObjectTypeText,
+			Text: &notionapi.Text{Content: query},
+			Annotations: &notionapi.Annotations{
+				Code: true,
+			},
+		},
+	}
+
+	// Use info icon for dataview placeholders.
+	emoji := notionapi.Emoji("📊")
+
+	return &notionapi.CalloutBlock{
+		BasicBlock: notionapi.BasicBlock{
+			Object: notionapi.ObjectTypeBlock,
+			Type:   "callout",
+		},
+		Callout: notionapi.Callout{
+			RichText: richText,
+			Icon: &notionapi.Icon{
+				Type:  "emoji",
+				Emoji: &emoji,
+			},
+			Color: "blue_background",
 		},
 	}
 }

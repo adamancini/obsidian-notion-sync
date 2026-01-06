@@ -992,6 +992,421 @@ func TestTransformList_EmptyNumberedItem(t *testing.T) {
 	}
 }
 
+// TestTransformDataviewBlock tests dataview code block transformation (ANN-22).
+func TestTransformDataviewBlock(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte("```dataview\nTABLE file.name, file.mtime\nFROM \"notes\"\nWHERE status = \"done\"\n```\n")
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find callout block (dataview should become a callout placeholder).
+	var callout *notionapi.CalloutBlock
+	for _, block := range page.Children {
+		if cb, ok := block.(*notionapi.CalloutBlock); ok {
+			callout = cb
+			break
+		}
+	}
+
+	if callout == nil {
+		t.Fatal("dataview block should be transformed to callout placeholder")
+	}
+
+	// Check icon is set (should be 📊).
+	if callout.Callout.Icon == nil || callout.Callout.Icon.Emoji == nil {
+		t.Error("dataview callout should have emoji icon")
+	}
+	if callout.Callout.Icon.Emoji != nil && *callout.Callout.Icon.Emoji != "📊" {
+		t.Errorf("icon = %v, want 📊", *callout.Callout.Icon.Emoji)
+	}
+
+	// Check rich text contains the query.
+	hasQueryContent := false
+	for _, rt := range callout.Callout.RichText {
+		if rt.Text != nil && strings.Contains(rt.Text.Content, "TABLE file.name") {
+			hasQueryContent = true
+			break
+		}
+	}
+	if !hasQueryContent {
+		t.Error("dataview callout should contain the original query")
+	}
+
+	// Check color.
+	if callout.Callout.Color != "blue_background" {
+		t.Errorf("callout color = %v, want blue_background", callout.Callout.Color)
+	}
+}
+
+// TestTransformDataviewJSBlock tests dataviewjs code block transformation.
+func TestTransformDataviewJSBlock(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte("```dataviewjs\ndv.list(dv.pages().map(p => p.file.name))\n```\n")
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find callout block.
+	var callout *notionapi.CalloutBlock
+	for _, block := range page.Children {
+		if cb, ok := block.(*notionapi.CalloutBlock); ok {
+			callout = cb
+			break
+		}
+	}
+
+	if callout == nil {
+		t.Fatal("dataviewjs block should be transformed to callout placeholder")
+	}
+
+	// Check it mentions "JS" in the title.
+	hasJSTitle := false
+	for _, rt := range callout.Callout.RichText {
+		if rt.Text != nil && strings.Contains(rt.Text.Content, "JS") {
+			hasJSTitle = true
+			break
+		}
+	}
+	if !hasJSTitle {
+		t.Error("dataviewjs callout should mention JS in the title")
+	}
+}
+
+// TestTransformInlineDataview tests inline dataview transformation (ANN-22).
+func TestTransformInlineDataview(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	// Inline dataview: `=this.file.name`
+	content := []byte("The file name is `=this.file.name` in this note.\n")
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	if len(page.Children) == 0 {
+		t.Fatal("page.Children should not be empty")
+	}
+
+	// Find the paragraph.
+	para, ok := page.Children[0].(*notionapi.ParagraphBlock)
+	if !ok {
+		t.Fatalf("expected paragraph, got %T", page.Children[0])
+	}
+
+	// Check that inline dataview is transformed with purple background.
+	hasDataviewPlaceholder := false
+	hasPurpleBackground := false
+	for _, rt := range para.Paragraph.RichText {
+		if rt.Text != nil && strings.Contains(rt.Text.Content, "dv:") {
+			hasDataviewPlaceholder = true
+		}
+		if rt.Annotations != nil && rt.Annotations.Color == notionapi.ColorPurpleBackground {
+			hasPurpleBackground = true
+		}
+	}
+
+	if !hasDataviewPlaceholder {
+		t.Error("inline dataview should create a [dv: ...] placeholder")
+	}
+	if !hasPurpleBackground {
+		t.Error("inline dataview placeholder should have purple background")
+	}
+}
+
+// TestTransformInlineDataview_RegularCodeSpan tests that regular code spans are not affected.
+func TestTransformInlineDataview_RegularCodeSpan(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	// Regular code span (not starting with =)
+	content := []byte("Use `console.log()` for debugging.\n")
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find the paragraph.
+	para, ok := page.Children[0].(*notionapi.ParagraphBlock)
+	if !ok {
+		t.Fatalf("expected paragraph, got %T", page.Children[0])
+	}
+
+	// Check that regular code span is not treated as dataview.
+	for _, rt := range para.Paragraph.RichText {
+		if rt.Text != nil && strings.Contains(rt.Text.Content, "dv:") {
+			t.Error("regular code span should not be treated as dataview")
+		}
+		// Regular code should have code annotation but NOT purple background.
+		if rt.Annotations != nil && rt.Annotations.Code && rt.Annotations.Color == notionapi.ColorPurpleBackground {
+			t.Error("regular code span should not have purple background")
+		}
+	}
+}
+
+// TestTransformImage_ExternalURL tests that external URL images become ImageBlocks (ANN-25).
+func TestTransformImage_ExternalURL(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte("![Alt text](https://example.com/image.png)\n")
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find image block.
+	var imageBlock *notionapi.ImageBlock
+	for _, block := range page.Children {
+		if ib, ok := block.(*notionapi.ImageBlock); ok {
+			imageBlock = ib
+			break
+		}
+	}
+
+	if imageBlock == nil {
+		t.Fatal("image block not found")
+	}
+
+	// Check it's an external image.
+	if imageBlock.Image.Type != "external" {
+		t.Errorf("image type = %v, want external", imageBlock.Image.Type)
+	}
+
+	if imageBlock.Image.External == nil {
+		t.Fatal("external file object should not be nil")
+	}
+
+	if imageBlock.Image.External.URL != "https://example.com/image.png" {
+		t.Errorf("URL = %v, want https://example.com/image.png", imageBlock.Image.External.URL)
+	}
+
+	// Check caption.
+	if len(imageBlock.Image.Caption) == 0 {
+		t.Error("image should have caption from alt text")
+	} else if imageBlock.Image.Caption[0].Text.Content != "Alt text" {
+		t.Errorf("caption = %v, want 'Alt text'", imageBlock.Image.Caption[0].Text.Content)
+	}
+}
+
+// TestTransformImage_LocalPath tests that local images become placeholder callouts (ANN-25).
+func TestTransformImage_LocalPath(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte("![Screenshot](./images/screenshot.png)\n")
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find callout block (local images become placeholders).
+	var callout *notionapi.CalloutBlock
+	for _, block := range page.Children {
+		if cb, ok := block.(*notionapi.CalloutBlock); ok {
+			callout = cb
+			break
+		}
+	}
+
+	if callout == nil {
+		t.Fatal("local image should be transformed to callout placeholder")
+	}
+
+	// Check icon is the image emoji.
+	if callout.Callout.Icon == nil || callout.Callout.Icon.Emoji == nil {
+		t.Error("local image callout should have emoji icon")
+	}
+	if callout.Callout.Icon.Emoji != nil && *callout.Callout.Icon.Emoji != "🖼️" {
+		t.Errorf("icon = %v, want 🖼️", *callout.Callout.Icon.Emoji)
+	}
+
+	// Check it mentions the path.
+	hasPath := false
+	for _, rt := range callout.Callout.RichText {
+		if rt.Text != nil && strings.Contains(rt.Text.Content, "screenshot.png") {
+			hasPath = true
+			break
+		}
+	}
+	if !hasPath {
+		t.Error("local image placeholder should contain the file path")
+	}
+}
+
+// TestTransformImage_NoCaption tests external images without alt text.
+func TestTransformImage_NoCaption(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	content := []byte("![](https://example.com/image.png)\n")
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Find image block.
+	var imageBlock *notionapi.ImageBlock
+	for _, block := range page.Children {
+		if ib, ok := block.(*notionapi.ImageBlock); ok {
+			imageBlock = ib
+			break
+		}
+	}
+
+	if imageBlock == nil {
+		t.Fatal("image block not found")
+	}
+
+	// Caption should be empty or nil (both are valid for Notion API).
+	if len(imageBlock.Image.Caption) > 0 {
+		t.Error("image without alt text should have empty caption")
+	}
+}
+
+// TestTransformImage_InParagraph tests that inline images in paragraphs don't create ImageBlocks.
+func TestTransformImage_InParagraph(t *testing.T) {
+	p := parser.New()
+	tr := New(nil, nil)
+
+	// Image with text around it - not standalone.
+	content := []byte("Text before ![image](https://example.com/img.png) and after.\n")
+
+	note, err := p.Parse("test.md", content)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	page, err := tr.Transform(note)
+	if err != nil {
+		t.Fatalf("Transform() error: %v", err)
+	}
+
+	// Should be a paragraph, not an image block.
+	if len(page.Children) == 0 {
+		t.Fatal("page should have children")
+	}
+
+	// The first block should be a paragraph (inline image remains in paragraph).
+	_, isPara := page.Children[0].(*notionapi.ParagraphBlock)
+	if !isPara {
+		t.Errorf("expected paragraph block for inline image, got %T", page.Children[0])
+	}
+
+	// There should be no standalone ImageBlock.
+	for _, block := range page.Children {
+		if _, ok := block.(*notionapi.ImageBlock); ok {
+			t.Error("inline image should not create a standalone ImageBlock")
+		}
+	}
+}
+
+// TestIsLocalPath tests the isLocalPath helper function.
+func TestIsLocalPath(t *testing.T) {
+	tests := []struct {
+		url      string
+		expected bool
+	}{
+		{"./images/photo.png", true},
+		{"../assets/img.jpg", true},
+		{"images/photo.png", true},
+		{"/absolute/path/image.gif", true},
+		{"file:///path/to/image.png", true},
+		{"https://example.com/image.png", false},
+		{"http://example.com/image.jpg", false},
+		{"data:image/png;base64,abc123", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.url, func(t *testing.T) {
+			result := isLocalPath(tt.url)
+			if result != tt.expected {
+				t.Errorf("isLocalPath(%q) = %v, want %v", tt.url, result, tt.expected)
+			}
+		})
+	}
+}
+
+// TestIsImageFile tests the isImageFile helper function.
+func TestIsImageFile(t *testing.T) {
+	tests := []struct {
+		filename string
+		expected bool
+	}{
+		{"photo.png", true},
+		{"photo.PNG", true},
+		{"image.jpg", true},
+		{"image.jpeg", true},
+		{"image.gif", true},
+		{"image.webp", true},
+		{"image.svg", true},
+		{"image.bmp", true},
+		{"document.pdf", false},
+		{"note.md", false},
+		{"video.mp4", false},
+		{"image", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.filename, func(t *testing.T) {
+			result := isImageFile(tt.filename)
+			if result != tt.expected {
+				t.Errorf("isImageFile(%q) = %v, want %v", tt.filename, result, tt.expected)
+			}
+		})
+	}
+}
+
 // TestSplitCodeContent tests the splitCodeContent helper function directly.
 func TestSplitCodeContent(t *testing.T) {
 	tests := []struct {

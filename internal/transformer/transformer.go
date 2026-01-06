@@ -152,6 +152,10 @@ func (t *Transformer) transformNode(n ast.Node, source []byte) (notionapi.Block,
 		if mathExpr := t.tryMathBlock(node, source); mathExpr != "" {
 			return t.transformEquation(mathExpr), true
 		}
+		// Check for standalone image (paragraph containing only an image).
+		if imageBlock := t.tryImageBlock(node, source); imageBlock != nil {
+			return imageBlock, true
+		}
 		return t.transformParagraph(node, source), true
 
 	case *ast.List:
@@ -163,10 +167,14 @@ func (t *Transformer) transformNode(n ast.Node, source []byte) (notionapi.Block,
 		return t.transformListItem(node, source), true
 
 	case *ast.FencedCodeBlock:
-		// Check for math code block.
+		// Check for special code block types.
 		lang := string(node.Language(source))
 		if lang == "math" || lang == "latex" {
 			return t.transformMathCodeBlock(node, source), true
+		}
+		// Check for dataview/dataviewjs code blocks.
+		if lang == "dataview" || lang == "dataviewjs" {
+			return t.transformDataviewBlock(node, source), true
 		}
 		return t.transformCodeBlock(node, source), true
 
